@@ -1,6 +1,6 @@
 # Claude Hardware — "Clod" (Claude On Desk)
 
-A physical desk companion that serves as a voice interface to Claude Code. A Raspberry Pi Zero 2W-powered bot with an animated procedural eye on a 128x64 OLED, speaker/mic for voice I/O, and USB connection to the user's Mac for executing Claude Code commands.
+A physical desk companion that serves as a voice interface to Claude Code. A Raspberry Pi Zero 2W-powered bot with an animated procedural eye rendered on a 64×64 RGB LED matrix, USB mic + USB sound card audio path, and USB connection to the user's Mac for executing Claude Code commands.
 
 ## Project Structure
 
@@ -21,7 +21,7 @@ claude-hardware/
 │   │   ├── stt_engine.py     # Vosk speech-to-text
 │   │   ├── claude_bridge.py  # asyncssh → Mac → claude -p
 │   │   ├── tts_engine.py     # piper-tts subprocess
-│   │   ├── display_renderer.py  # Procedural eye on SSD1306
+│   │   ├── matrix_renderer.py   # Procedural eye on 64x64 RGB matrix
 │   │   ├── servo_controller.py  # SG90 gesture presets
 │   │   ├── state_machine.py     # IDLE→LISTENING→THINKING→SPEAKING
 │   │   ├── wake_word.py         # "Hey Claude" detection
@@ -41,20 +41,25 @@ claude-hardware/
 
 ## Tech Stack
 
-- **Hardware**: Raspberry Pi Zero 2W, SSD1306 OLED (I2C), INMP441 mic (I2S), MAX98357A amp (I2S), SG90 servo (PWM)
+- **Hardware**: Raspberry Pi Zero 2W, 64×64 RGB LED matrix (HUB75) via WatangTech adapter, USB mini mic, Sabrent USB sound card, PAM8403 amp, 4Ω 3W speaker, SG90 servo (PWM, Phase 3)
 - **Language**: Python 3.11+ with asyncio
-- **Key libraries**: `vosk`, `sounddevice`, `piper-tts`, `asyncssh`, `webrtcvad`, `adafruit-circuitpython-ssd1306`, `Pillow`, `pigpio`
+- **Key libraries**: `vosk`, `sounddevice`, `piper-tts`, `asyncssh`, `webrtcvad`, `rpi-rgb-led-matrix` (Henner Zeller), `Pillow`, `pigpio`
 - **Communication**: USB gadget mode (RNDIS/ECM Ethernet) → SSH to Mac
 - **Claude integration**: `claude -p --output-format stream-json` via SSH subprocess
+- **Matrix config**: library flag `--led-hardware-mapping=regular` for the WatangTech HUB75 adapter (not `adafruit-hat`)
+- **Audio routing**: USB mic → PyAudio/sounddevice → Vosk; Piper → `aplay` → Sabrent USB sound card → PAM8403 → speaker
 
 ## Conventions
 
 - All inter-module communication goes through the event bus — modules never import each other directly
 - Event names use dot notation: `audio.vad_start`, `claude.stream_chunk`, `face.set_state`
-- Display rendering targets 20 FPS (50ms per frame) using Pillow → SSD1306
+- Matrix rendering targets 20 FPS (50ms per frame) using Pillow → `rpi-rgb-led-matrix`
 - Eye animation uses parameter interpolation (lerp), not pre-baked sprite frames
+- Iris color and pupil size are part of the parameter set — emotional state drives both shape AND color
+- Matrix brightness capped at 30% in config for desk use (panels are painfully bright at full)
 - Configuration lives in `config.yaml`, not hardcoded
-- Servo power comes from a separate rail, never from Pi's 5V GPIO
+- HUB75 adapter consumes most GPIO pins — use BCM 27 for push-to-talk button; other GPIO usage must be verified against HUB75 pin allocation before wiring
+- Servo power (Phase 3) comes from a separate rail, never from Pi's 5V GPIO
 - All audio assets are pre-generated WAVs, not synthesized at runtime
 
 ## Development
@@ -75,8 +80,8 @@ pytest software/tests/
 
 ## Build Phases
 
-- **Phase 1**: Voice pipeline (mic → STT → Claude via SSH → TTS → speaker)
-- **Phase 2**: Display + animated eye character
+- **Phase 1**: Voice pipeline + 64×64 matrix face running together (button → STT → Claude → TTS + animated eye)
+- **Phase 2**: Enclosure (deferred — breadboard layout for Phase 1)
 - **Phase 3**: Servo movement (single-axis nod)
 - **Phase 4**: Wake word, idle behaviors, polish
 
