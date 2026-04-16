@@ -1,0 +1,44 @@
+# Clod default configuration.
+# Edit these values to match your environment before running.
+
+# SSH connection to the Mac that runs Claude Code.
+mac_ssh:
+  host: 192.168.7.1
+  user: joseph
+  key_path: ~/.ssh/id_ed25519
+
+# Vosk STT model.
+vosk:
+  model_path: ~/models/vosk-model-small-en-us-0.15
+
+# Piper TTS voice.
+piper:
+  voice_model: ~/models/piper/en_US-amy-medium.onnx
+  speaker_id: 0
+
+# HUB75 LED matrix panel settings.
+matrix:
+  rows: 64
+  cols: 64
+  brightness: 30
+  hardware_mapping: regular
+  slowdown_gpio: 4
+
+# Audio I/O and VAD settings.
+audio:
+  input_device: auto
+  output_device: auto
+  sample_rate: 16000
+  vad_aggressiveness: 2
+  vad_silence_ms: 300
+
+# GPIO pin assignments.
+gpio:
+  button_pin: 27
+  servo_pin: null  # tbd
+
+# High-level behavior.
+behavior:
+  wake_word_enabled: false
+  idle_sleep_minutes: 5
+  personality_quirks: true

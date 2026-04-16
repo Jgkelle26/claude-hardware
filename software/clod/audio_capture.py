@@ -1,0 +1,23 @@
+"""Audio capture: mic input, VAD segmentation, and audio.* event emission."""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from clod.event_bus import EventBus
+
+logger = logging.getLogger(__name__)
+
+
+class AudioCapture:
+    """Captures mic audio via sounddevice, runs webrtcvad, emits audio.* events."""
+
+    def __init__(self, bus: EventBus, config: Any) -> None:
+        self._bus = bus
+        self._config = config
+
+    async def run(self) -> None:
+        """Main capture loop."""
+        # TODO: implement
+        ...

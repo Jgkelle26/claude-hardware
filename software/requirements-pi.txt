@@ -1,0 +1,4 @@
+# Pi-only dependencies. Install on the Raspberry Pi after requirements.txt.
+vosk>=0.3.45
+# Note: piper-tts installed separately via binary download (not pip)
+# Note: rpi-rgb-led-matrix installed separately via source compile from https://github.com/hzeller/rpi-rgb-led-matrix
