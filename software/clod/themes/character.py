@@ -606,16 +606,61 @@ class CharacterTheme(ThemeRenderer):
         now: float,
         dt: float,
     ) -> None:
-        """Speaking: mouth oscillates, slight face brightness pulse."""
+        """Speaking: face turns left/right, nods, mouth oscillates."""
         self._speak_phase += dt * 3.0 * math.tau  # ~3 Hz
+
+        # --- Face turn: slow horizontal shift simulating rotation ---
+        # Slow oscillation (~0.3 Hz) for the turn, separate from mouth
+        turn_phase: float = self._time * 0.3 * math.tau
+        turn_amount: float = math.sin(turn_phase) * 3.0  # ±3 pixel shift
+        turn_int: int = int(round(turn_amount))
+
+        # Shift brightness map horizontally to simulate face turning
+        if turn_int != 0:
+            for y in range(self.height):
+                old_row = face_map[y][:]
+                for x in range(self.width):
+                    sx = x - turn_int
+                    if 0 <= sx < self.width:
+                        face_map[y][x] = old_row[sx]
+                    else:
+                        face_map[y][x] = 0.02
+
+        # --- Depth gradient: near cheek brighter, far cheek darker ---
+        # When turned right (positive), left side is "near" (brighter)
+        cx: float = self.width / 2.0
+        for y in range(self.height):
+            for x in range(self.width):
+                if face_map[y][x] > 0.08:  # only affect face pixels
+                    # Gradient: pixels on the "near" side get brightened
+                    dist_from_center = (x - cx) / cx  # -1 to +1
+                    depth_mod = -dist_from_center * turn_amount * 0.04
+                    face_map[y][x] = _clamp(face_map[y][x] + depth_mod, 0.0, 1.0)
+
+        # --- Subtle vertical nod ---
+        nod_phase: float = self._time * 0.5 * math.tau  # ~0.5 Hz
+        nod_amount: int = int(round(math.sin(nod_phase) * 1.5))  # ±1-2 pixels
+        if nod_amount != 0:
+            if nod_amount > 0:
+                for y in range(self.height - 1, nod_amount - 1, -1):
+                    face_map[y] = face_map[y - nod_amount][:]
+                for y in range(nod_amount):
+                    face_map[y] = [0.02] * self.width
+            else:
+                amt = abs(nod_amount)
+                for y in range(self.height - amt):
+                    face_map[y] = face_map[y + amt][:]
+                for y in range(self.height - amt, self.height):
+                    face_map[y] = [0.02] * self.width
 
         # Mouth brightness oscillates 0.20 -> 0.50 -> 0.20
         mouth_b: float = 0.20 + 0.30 * (0.5 + 0.5 * math.sin(self._speak_phase))
         self._set_mouth_region(face_map, mouth_b, 1.0)
 
-        # Eyes normal, centered pupils
-        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "open", 0.0, 0.0)
-        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "open", 0.0, 0.0)
+        # Eyes normal, pupils track slightly with the turn direction
+        pupil_track: float = turn_amount * 0.4
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "open", pupil_track, 0.0)
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "open", pupil_track, 0.0)
 
     def _apply_error(
         self,
@@ -693,22 +738,27 @@ class CharacterTheme(ThemeRenderer):
         return p
 
     def _get_state_shimmer(self, state: FaceState) -> float:
-        """Return shimmer intensity for the current state."""
+        """Return shimmer intensity for the current state.
+
+        Lower = more stable / coherent face. Higher = more pixel noise.
+        Sleeping's calm 0.15 is the baseline feel; other states add subtle
+        texture without overwhelming the face shape.
+        """
         if state == FaceState.SLEEPING:
-            return 0.2
+            return 0.12
         if state == FaceState.IDLE:
-            return 1.0
+            return 0.20
         if state == FaceState.LISTENING:
-            return 1.0
+            return 0.18
         if state == FaceState.THINKING:
-            return 1.0
+            return 0.30
         if state == FaceState.SPEAKING:
-            return 1.0
+            return 0.25
         if state == FaceState.ERROR:
-            return 1.0
+            return 0.50
         if state == FaceState.HAPPY:
-            return 1.0
-        return 1.0
+            return 0.28
+        return 0.20
 
     def _get_brightness_multiplier(self, state: FaceState) -> float:
         """Return overall brightness multiplier for the face map."""
