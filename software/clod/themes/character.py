@@ -23,14 +23,14 @@ from clod.themes.base import ThemeRenderer
 # ---------------------------------------------------------------------------
 
 PALETTE_VARIANTS: list[list[tuple[int, int, int]]] = [
-    # Classic: navy / red / cyan / white
-    [(10, 10, 45), (200, 30, 40), (0, 190, 230), (240, 240, 250)],
-    # Warm: dark red / orange / yellow / cream
-    [(30, 10, 10), (220, 80, 0), (255, 200, 50), (255, 250, 240)],
-    # Cool: navy / blue / teal / ice
-    [(10, 20, 50), (50, 80, 180), (100, 220, 200), (230, 245, 255)],
-    # Neon: deep purple / magenta / green / white
-    [(15, 0, 30), (255, 0, 80), (0, 255, 180), (255, 255, 255)],
+    # Soft classic: muted navy / dusty rose / soft teal / warm white
+    [(18, 18, 50), (165, 70, 80), (70, 160, 180), (225, 225, 235)],
+    # Warm: deep brown / terracotta / golden / cream
+    [(35, 20, 15), (185, 95, 55), (210, 175, 80), (245, 240, 230)],
+    # Cool: slate / soft blue / seafoam / ice
+    [(20, 28, 55), (75, 110, 170), (120, 195, 180), (220, 235, 245)],
+    # Dusk: deep purple / mauve / lavender / soft white
+    [(22, 12, 40), (150, 80, 130), (160, 145, 200), (235, 230, 245)],
 ]
 
 # Brightness-to-color probability thresholds.
@@ -428,58 +428,65 @@ class CharacterTheme(ThemeRenderer):
     ) -> None:
         """Modify the face_map in an eye region.
 
+        Uses elliptical falloff for a softer, more organic eye shape.
+        A dark ring around the bright iris creates negative-space definition.
         *mode*: ``"open"``, ``"closed"``, ``"half"``, ``"bright"``, ``"happy"``
         """
-        rx: int = self._EYE_RX
-        ry: int = self._EYE_RY
+        rx: int = self._EYE_RX + 1  # slightly larger region for soft edges
+        ry: int = self._EYE_RY + 1
 
         for y in range(ecy - ry, ecy + ry + 1):
             for x in range(ecx - rx, ecx + rx + 1):
                 if y < 0 or y >= self.height or x < 0 or x >= self.width:
                     continue
 
-                if mode == "closed":
-                    face_map[y][x] = 0.10
-                elif mode == "half":
-                    # Top half dark, bottom half bright
-                    if y < ecy:
-                        face_map[y][x] = 0.10
-                    else:
-                        face_map[y][x] = 0.80
-                elif mode == "happy":
-                    # ^_^ shape: bright bottom, dark top
-                    if y >= ecy:
-                        face_map[y][x] = 0.85
-                    else:
-                        face_map[y][x] = 0.10
-                elif mode == "bright":
-                    # Extra bright (listening)
-                    dist = ((x - ecx) / 3.0) ** 2 + ((y - ecy) / 2.5) ** 2
-                    if dist < 1.0:
-                        face_map[y][x] = 0.95
-                    else:
-                        face_map[y][x] = 0.15
-                    # Pupil
-                    px = ecx + int(round(pupil_ox))
-                    py = ecy + int(round(pupil_oy))
-                    if abs(x - px) <= 1 and abs(y - py) <= 1:
-                        face_map[y][x] = 0.0
-                elif mode == "open":
-                    # Standard open eye — restore from base but adjust pupil position
-                    dist = ((x - ecx) / 3.0) ** 2 + ((y - ecy) / 2.5) ** 2
-                    if dist < 1.0:
-                        iris_bright = (1.0 - dist) * 0.75
-                        face_map[y][x] = max(0.15, iris_bright + 0.15)
-                        face_map[y][x] = min(face_map[y][x], 0.95)
-                    else:
-                        face_map[y][x] = 0.15
+                # Elliptical distance from eye center (0 = center, 1 = edge)
+                edist = math.sqrt(((x - ecx) / (self._EYE_RX + 0.5)) ** 2
+                                  + ((y - ecy) / (self._EYE_RY + 0.5)) ** 2)
 
-                    # Shifted pupil
+                if mode == "closed":
+                    # Soft close — gradient from dark center to socket
+                    face_map[y][x] = 0.08 + 0.04 * min(edist, 1.0)
+                elif mode == "half":
+                    # Top half dark, bottom half bright with soft gradient
+                    vert_factor = (y - (ecy - 1)) / max(1, self._EYE_RY * 2)
+                    vert_factor = _clamp(vert_factor, 0.0, 1.0)
+                    face_map[y][x] = 0.08 + 0.70 * vert_factor * _gauss(edist, 0.9)
+                elif mode == "happy":
+                    # ^_^ crescent — bright arc at bottom, dark above
+                    vert_factor = (y - ecy) / max(1, self._EYE_RY)
+                    vert_factor = _clamp(vert_factor, 0.0, 1.0)
+                    face_map[y][x] = 0.08 + 0.80 * vert_factor * _gauss(edist, 0.9)
+                elif mode in ("bright", "open"):
+                    # --- Dark socket ring for definition ---
+                    # Outer ring (0.7 < edist < 1.1): dark border
+                    if edist > 0.7:
+                        socket_dark = _clamp((edist - 0.7) / 0.4, 0.0, 1.0) * 0.6
+                        face_map[y][x] = 0.10 + 0.05 * (1.0 - socket_dark)
+                        continue
+
+                    # --- Iris with soft radial gradient ---
+                    iris_glow = _gauss(edist, 0.55)
+                    if mode == "bright":
+                        base_bright = 0.50 + 0.50 * iris_glow  # 0.50-1.00
+                    else:
+                        base_bright = 0.35 + 0.55 * iris_glow  # 0.35-0.90
+
+                    face_map[y][x] = min(base_bright, 0.97)
+
+                    # --- Pupil: soft dark spot with gradient ---
                     px = ecx + int(round(pupil_ox))
                     py = ecy + int(round(pupil_oy))
-                    pdist = abs(x - px) + abs(y - py)
-                    if pdist < 1.8:
-                        face_map[y][x] = 0.0
+                    pupil_dist = math.sqrt((x - px) ** 2 + (y - py) ** 2)
+                    if pupil_dist < 2.5:
+                        pupil_dark = _gauss(pupil_dist, 1.5)
+                        face_map[y][x] *= (1.0 - pupil_dark * 0.95)
+
+                    # --- Highlight catch-light: tiny bright spot ---
+                    hx = px - 1
+                    hy = py - 1
+                    if x == hx and y == hy:
+                        face_map[y][x] = 0.98
 
     def _set_mouth_region(
         self,
@@ -566,21 +573,50 @@ class CharacterTheme(ThemeRenderer):
         now: float,
         dt: float,
     ) -> None:
-        """Listening: brighter face, wide eyes, face shifts up 1-2px."""
-        # Shift the face map up by 1 pixel (lean forward)
-        if self._listen_shift < 2:
-            self._listen_shift = 2
+        """Listening: face leans forward and sways gently, wide bright eyes."""
+        # --- Gentle face sway: slower and subtler than speaking ---
+        sway_phase: float = self._time * 0.2 * math.tau  # ~0.2 Hz
+        sway_amount: float = math.sin(sway_phase) * 2.0  # ±2 pixel shift
+        sway_int: int = int(round(sway_amount))
 
-        # Shift is handled by brightness multiplier + eye brightness
-        # Wide open, bright eyes with centered pupils
-        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "bright", 0.0, 0.0)
-        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "bright", 0.0, 0.0)
+        # Horizontal shift
+        if sway_int != 0:
+            for y in range(self.height):
+                old_row = face_map[y][:]
+                for x in range(self.width):
+                    sx = x - sway_int
+                    if 0 <= sx < self.width:
+                        face_map[y][x] = old_row[sx]
+                    else:
+                        face_map[y][x] = 0.02
 
-        # Shift brightness map up by 1-2 rows
+        # Depth gradient (near side brighter)
+        cx: float = self.width / 2.0
+        for y in range(self.height):
+            for x in range(self.width):
+                if face_map[y][x] > 0.08:
+                    dist_from_center = (x - cx) / cx
+                    depth_mod = -dist_from_center * sway_amount * 0.03
+                    face_map[y][x] = _clamp(face_map[y][x] + depth_mod, 0.0, 1.0)
+
+        # --- Subtle forward lean (shift up 2px) ---
         for y in range(self.height - 2):
             face_map[y] = face_map[y + 2][:]
         face_map[self.height - 2] = [0.0] * self.width
         face_map[self.height - 1] = [0.0] * self.width
+
+        # --- Gentle nod ---
+        nod_phase: float = self._time * 0.35 * math.tau
+        nod_amount: int = int(round(math.sin(nod_phase) * 1.0))  # ±1 pixel
+        if nod_amount > 0:
+            for y in range(self.height - 1, nod_amount - 1, -1):
+                face_map[y] = face_map[y - nod_amount][:]
+            for y in range(nod_amount):
+                face_map[y] = [0.02] * self.width
+
+        # Wide open, bright eyes with centered pupils
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "bright", 0.0, 0.0)
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "bright", 0.0, 0.0)
 
     def _apply_thinking(
         self,
@@ -668,14 +704,35 @@ class CharacterTheme(ThemeRenderer):
         now: float,
         dt: float,
     ) -> None:
-        """Error: glitch offsets, asymmetric eyes, distorted."""
-        # Random horizontal offsets per row (glitch)
-        for y in range(self.height):
-            self._error_offsets[y] = random.randint(-2, 2)
+        """Error: face dims and destabilizes quietly — something is off.
 
-        # Asymmetric eyes — left bright, right dark
-        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "bright", 2.0, 0.0)
-        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "closed")
+        No chaotic glitching. Instead the face slowly fades unevenly,
+        one eye drifts closed, and a subtle vertical drift makes it
+        feel like the signal is weakening.
+        """
+        # Clear glitch offsets — no horizontal distortion
+        for y in range(self.height):
+            self._error_offsets[y] = 0
+
+        # Uneven fade — darken random patches across the face
+        for y in range(self.height):
+            for x in range(self.width):
+                if face_map[y][x] > 0.08:
+                    # Slow vertical wave that dims parts of the face
+                    wave = math.sin((y + self._time * 8) * 0.3) * 0.15
+                    face_map[y][x] = _clamp(face_map[y][x] - 0.10 + wave, 0.03, 0.85)
+
+        # One eye slowly closing, the other barely open
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "half", 1.0, 0.5)
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "open", -0.5, 0.5)
+
+        # Slow downward drift — face sinks 1px
+        drift: int = int(math.sin(self._time * 0.5) * 1.5)
+        if drift > 0:
+            for y in range(self.height - 1, drift - 1, -1):
+                face_map[y] = face_map[y - drift][:]
+            for y in range(drift):
+                face_map[y] = [0.02] * self.width
 
     def _apply_happy(
         self,
@@ -728,13 +785,21 @@ class CharacterTheme(ThemeRenderer):
         """Return the active palette, possibly modified by state."""
         p = list(self._palette)
         if state == FaceState.ERROR:
-            # Replace mid-dark with brighter red, desaturate cyan
-            p[1] = (255, 0, 0)
-            p[2] = (120, 140, 150)  # desaturated cyan
+            # Muted, desaturated — something fading out quietly
+            p[0] = (25, 20, 20)       # dark warm gray
+            p[1] = (140, 80, 50)      # dull amber
+            p[2] = (110, 105, 100)    # warm gray
+            p[3] = (190, 180, 170)    # faded cream
         elif state == FaceState.HAPPY:
-            # Warm shift: red -> orange, cyan -> yellow
-            p[1] = (255, 140, 0)
-            p[2] = (255, 230, 50)
+            # Soft warm glow — golden, not harsh
+            p[1] = (210, 150, 50)     # soft gold
+            p[2] = (230, 210, 100)    # warm yellow
+        elif state == FaceState.SLEEPING:
+            # Deep midnight blue palette
+            p[0] = (8, 10, 35)        # deep midnight
+            p[1] = (25, 35, 80)       # dark blue
+            p[2] = (50, 70, 130)      # muted blue
+            p[3] = (90, 105, 160)     # soft blue-gray
         return p
 
     def _get_state_shimmer(self, state: FaceState) -> float:
@@ -755,7 +820,7 @@ class CharacterTheme(ThemeRenderer):
         if state == FaceState.SPEAKING:
             return 0.25
         if state == FaceState.ERROR:
-            return 0.50
+            return 0.18
         if state == FaceState.HAPPY:
             return 0.28
         return 0.20
