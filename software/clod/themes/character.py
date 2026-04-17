@@ -1,8 +1,10 @@
-"""Character theme — chunky pixel robot with strong personality and expressive animations.
+"""Character theme — dithered pixel portrait.
 
-A De Stijl-inspired robot character with rectangular face plate, white eyes
-with black pupils, colored hat/mouth/legs, and a full range of emotive
-animations driven by :class:`FaceState`.
+A face emerges from probabilistic colored noise on the 64x64 grid.
+Up close it looks like colored static; step back and you see a face with
+depth, shadows, and highlights — like a halftone print using bold colors.
+The face shimmers every frame because each pixel's color is re-rolled
+probabilistically, giving it a restless, alive quality.
 """
 
 from __future__ import annotations
@@ -10,243 +12,184 @@ from __future__ import annotations
 import math
 import random
 import time
-from dataclasses import dataclass, field, fields
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from clod.events import FaceState
 from clod.themes.base import ThemeRenderer
 
 # ---------------------------------------------------------------------------
-# Color schemes — randomly selected on each activation
+# Palette variants — selected randomly on each activation
 # ---------------------------------------------------------------------------
 
-COLOR_SCHEMES: list[dict[str, tuple[int, int, int]]] = [
-    {
-        "face": (0, 100, 255),
-        "hat": (255, 204, 0),
-        "mouth": (0, 180, 80),
-        "leg_l": (255, 0, 0),
-        "leg_r": (0, 200, 200),
-        "accent": (255, 102, 0),
-    },
-    {
-        "face": (255, 204, 0),
-        "hat": (0, 200, 200),
-        "mouth": (0, 100, 255),
-        "leg_l": (0, 100, 255),
-        "leg_r": (255, 204, 0),
-        "accent": (255, 0, 0),
-    },
-    {
-        "face": (0, 180, 80),
-        "hat": (220, 100, 220),
-        "mouth": (0, 100, 255),
-        "leg_l": (255, 0, 0),
-        "leg_r": (0, 200, 200),
-        "accent": (255, 204, 0),
-    },
-    {
-        "face": (255, 0, 0),
-        "hat": (255, 204, 0),
-        "mouth": (0, 100, 255),
-        "leg_l": (255, 140, 180),
-        "leg_r": (0, 100, 255),
-        "accent": (0, 180, 80),
-    },
-    {
-        "face": (255, 204, 0),
-        "hat": (0, 180, 80),
-        "mouth": (255, 0, 0),
-        "leg_l": (255, 140, 180),
-        "leg_r": (0, 100, 255),
-        "accent": (0, 200, 200),
-    },
-    {
-        "face": (0, 200, 200),
-        "hat": (255, 0, 0),
-        "mouth": (255, 204, 0),
-        "leg_l": (0, 180, 80),
-        "leg_r": (255, 0, 0),
-        "accent": (0, 100, 255),
-    },
+PALETTE_VARIANTS: list[list[tuple[int, int, int]]] = [
+    # Classic: navy / red / cyan / white
+    [(10, 10, 45), (200, 30, 40), (0, 190, 230), (240, 240, 250)],
+    # Warm: dark red / orange / yellow / cream
+    [(30, 10, 10), (220, 80, 0), (255, 200, 50), (255, 250, 240)],
+    # Cool: navy / blue / teal / ice
+    [(10, 20, 50), (50, 80, 180), (100, 220, 200), (230, 245, 255)],
+    # Neon: deep purple / magenta / green / white
+    [(15, 0, 30), (255, 0, 80), (0, 255, 180), (255, 255, 255)],
 ]
 
-# Eye / pupil constants
-EYE_COLOR: tuple[int, int, int] = (255, 255, 255)
-PUPIL_COLOR: tuple[int, int, int] = (0, 0, 0)
-BG_COLOR: tuple[int, int, int] = (0, 0, 0)
-
-# ---------------------------------------------------------------------------
-# Character anatomy constants (pixel positions on 64x64 canvas)
-# ---------------------------------------------------------------------------
-
-# All positions are relative to a horizontally centered character.
-CANVAS = 64
-
-# Hat
-HAT_WIDTH = 34
-HAT_HEIGHT = 4
-HAT_Y = 6
-
-# Face plate
-FACE_WIDTH = 44
-FACE_HEIGHT = 24
-FACE_Y = 10
-
-# Eyes (relative to face plate top-left)
-EYE_WIDTH = 10
-EYE_HEIGHT = 8
-EYE_Y = 14  # absolute y of eye top
-EYE_LEFT_X = (CANVAS - FACE_WIDTH) // 2 + 5   # 15
-EYE_RIGHT_X = (CANVAS + FACE_WIDTH) // 2 - 5 - EYE_WIDTH  # 39
-
-# Pupils
-PUPIL_SIZE = 3
-
-# Mouth
-MOUTH_WIDTH = 36
-MOUTH_HEIGHT = 4
-MOUTH_Y = 28
-
-# Legs
-LEG_WIDTH = 4
-LEG_HEIGHT = 14
-LEG_Y = 34
-LEG_LEFT_X = (CANVAS // 2) - 12
-LEG_RIGHT_X = (CANVAS // 2) + 8
-
-# Centered x helpers
-FACE_X = (CANVAS - FACE_WIDTH) // 2
-HAT_X = (CANVAS - HAT_WIDTH) // 2
-MOUTH_X = (CANVAS - MOUTH_WIDTH) // 2
+# Brightness-to-color probability thresholds.
+# Each row: (navy_cumul, red_cumul, cyan_cumul)  — white is the remainder.
+_THRESHOLDS: list[tuple[float, float, float, float]] = [
+    # b < 0.15
+    (0.15, 0.85, 0.95, 0.99),
+    # b < 0.35
+    (0.35, 0.40, 0.80, 0.95),
+    # b < 0.55
+    (0.55, 0.15, 0.50, 0.85),
+    # b < 0.75
+    (0.75, 0.05, 0.20, 0.60),
+    # b >= 0.75
+    (1.01, 0.02, 0.07, 0.32),
+]
 
 
-# ---------------------------------------------------------------------------
-# Animated character state
-# ---------------------------------------------------------------------------
+def _pick_color(
+    b: float,
+    r: float,
+    palette: list[tuple[int, int, int]],
+) -> tuple[int, int, int]:
+    """Given brightness *b* and random float *r*, return a palette color."""
+    # Find the right threshold band
+    if b < 0.15:
+        _, cn, cr, cc = _THRESHOLDS[0]
+    elif b < 0.35:
+        _, cn, cr, cc = _THRESHOLDS[1]
+    elif b < 0.55:
+        _, cn, cr, cc = _THRESHOLDS[2]
+    elif b < 0.75:
+        _, cn, cr, cc = _THRESHOLDS[3]
+    else:
+        _, cn, cr, cc = _THRESHOLDS[4]
 
-@dataclass
-class CharacterState:
-    """All animatable parameters for the character."""
-
-    left_pupil_x: float = 0.0      # offset from eye center, -3..+3
-    left_pupil_y: float = 0.0      # offset from eye center, -2..+2
-    right_pupil_x: float = 0.0
-    right_pupil_y: float = 0.0
-    left_eye_height: float = 1.0   # 1.0 = full, 0.0 = closed
-    right_eye_height: float = 1.0
-    mouth_width: float = 1.0       # 0.5 = narrow, 1.0 = normal, 1.2 = wide
-    mouth_y_offset: float = 0.0    # 0 = normal, +2 = dropped (surprised)
-    body_y_offset: float = 0.0     # 0 = normal, -2 = bouncing up
-    left_leg_angle: float = 0.0    # -0.3..0.3 radians
-    right_leg_angle: float = 0.0
-    hat_y_offset: float = 0.0      # 0 = normal, -2 = popped up
-
-
-# Per-state target presets
-_STATE_TARGETS: dict[FaceState, CharacterState] = {
-    FaceState.IDLE: CharacterState(
-        left_pupil_x=0.0, left_pupil_y=0.0,
-        right_pupil_x=0.0, right_pupil_y=0.0,
-        left_eye_height=1.0, right_eye_height=1.0,
-        mouth_width=1.0, mouth_y_offset=0.0,
-        body_y_offset=0.0,
-        left_leg_angle=0.0, right_leg_angle=0.0,
-        hat_y_offset=0.0,
-    ),
-    FaceState.LISTENING: CharacterState(
-        left_pupil_x=0.0, left_pupil_y=0.0,
-        right_pupil_x=0.0, right_pupil_y=0.0,
-        left_eye_height=1.0, right_eye_height=1.0,
-        mouth_width=1.0, mouth_y_offset=0.0,
-        body_y_offset=0.0,
-        left_leg_angle=0.0, right_leg_angle=0.0,
-        hat_y_offset=0.0,
-    ),
-    FaceState.THINKING: CharacterState(
-        left_pupil_x=-2.0, left_pupil_y=-1.5,
-        right_pupil_x=-2.0, right_pupil_y=-1.5,
-        left_eye_height=0.7, right_eye_height=1.0,
-        mouth_width=0.8, mouth_y_offset=0.0,
-        body_y_offset=-1.0,
-        left_leg_angle=0.15, right_leg_angle=-0.1,
-        hat_y_offset=0.0,
-    ),
-    FaceState.SPEAKING: CharacterState(
-        left_pupil_x=0.0, left_pupil_y=0.0,
-        right_pupil_x=0.0, right_pupil_y=0.0,
-        left_eye_height=1.0, right_eye_height=1.0,
-        mouth_width=1.0, mouth_y_offset=0.0,
-        body_y_offset=0.0,
-        left_leg_angle=0.0, right_leg_angle=0.0,
-        hat_y_offset=0.0,
-    ),
-    FaceState.ERROR: CharacterState(
-        left_pupil_x=2.0, left_pupil_y=0.0,
-        right_pupil_x=-2.0, right_pupil_y=0.0,
-        left_eye_height=0.5, right_eye_height=1.0,
-        mouth_width=0.7, mouth_y_offset=3.0,
-        body_y_offset=2.0,
-        left_leg_angle=0.25, right_leg_angle=-0.25,
-        hat_y_offset=0.0,
-    ),
-    FaceState.HAPPY: CharacterState(
-        left_pupil_x=0.0, left_pupil_y=0.0,
-        right_pupil_x=0.0, right_pupil_y=0.0,
-        left_eye_height=0.3, right_eye_height=0.3,
-        mouth_width=1.2, mouth_y_offset=0.0,
-        body_y_offset=0.0,
-        left_leg_angle=0.0, right_leg_angle=0.0,
-        hat_y_offset=-2.0,
-    ),
-    FaceState.SLEEPING: CharacterState(
-        left_pupil_x=0.0, left_pupil_y=0.0,
-        right_pupil_x=0.0, right_pupil_y=0.0,
-        left_eye_height=0.1, right_eye_height=0.1,
-        mouth_width=0.6, mouth_y_offset=0.0,
-        body_y_offset=1.0,
-        left_leg_angle=0.1, right_leg_angle=-0.1,
-        hat_y_offset=0.0,
-    ),
-}
-
-
-# ---------------------------------------------------------------------------
-# Sleep Z particle
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _ZParticle:
-    """A tiny 'z' that floats upward from the sleeping character."""
-
-    x: float
-    y: float
-    age: float = 0.0
-    lifetime: float = 2.5
-
-
-# ---------------------------------------------------------------------------
-# Interpolation helpers
-# ---------------------------------------------------------------------------
-
-def _lerp(a: float, b: float, t: float) -> float:
-    """Linear interpolation."""
-    return a + (b - a) * t
+    if r < cn:
+        return palette[0]  # navy / shadow
+    if r < cr:
+        return palette[1]  # red / mid-dark
+    if r < cc:
+        return palette[2]  # cyan / mid-bright
+    return palette[3]      # white / highlight
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
-def _lerp_state(current: CharacterState, target: CharacterState, t: float) -> CharacterState:
-    """Interpolate all fields between two CharacterState instances."""
-    kwargs: dict[str, float] = {}
-    for f in fields(CharacterState):
-        cur_val = getattr(current, f.name)
-        tgt_val = getattr(target, f.name)
-        kwargs[f.name] = _lerp(cur_val, tgt_val, t)
-    return CharacterState(**kwargs)
+def _gauss(dist: float, sigma: float) -> float:
+    """Unnormalized gaussian falloff."""
+    return math.exp(-(dist * dist) / (sigma * sigma))
+
+
+# ---------------------------------------------------------------------------
+# Face map builder
+# ---------------------------------------------------------------------------
+
+def _build_face_map(width: int, height: int) -> list[list[float]]:
+    """Procedurally generate a 64x64 brightness template of a face.
+
+    Returns a 2-D list indexed as ``[y][x]`` with values in 0.0 .. 1.0.
+    """
+    cx: float = width / 2.0   # 32
+    cy: float = 30.0           # face center y (slightly above middle)
+
+    face_rx: float = 22.0      # face oval x radius
+    face_ry: float = 25.0      # face oval y radius
+
+    fmap: list[list[float]] = []
+    for y in range(height):
+        row: list[float] = []
+        for x in range(width):
+            # Normalised distance from face center in oval space
+            dx: float = (x - cx) / face_rx
+            dy: float = (y - cy) / face_ry
+            oval_dist: float = math.sqrt(dx * dx + dy * dy)
+
+            # Base face shape — gaussian falloff from center of oval
+            face_val: float = _gauss(oval_dist, 0.85)
+
+            if oval_dist > 1.15:
+                # Outside face — sparse background
+                b = random.uniform(0.0, 0.05)
+                row.append(b)
+                continue
+
+            # Gradient from face brightness into background at edges
+            if oval_dist > 0.85:
+                edge_factor = 1.0 - (oval_dist - 0.85) / 0.30
+                edge_factor = _clamp(edge_factor, 0.0, 1.0)
+                face_val *= edge_factor
+
+            # --- Feature regions ---
+
+            # Forehead (y 8-18): bright
+            if 8 <= y <= 18:
+                forehead_factor = _gauss(y - 13.0, 6.0) * _gauss(x - cx, 18.0)
+                face_val = max(face_val, 0.55 + 0.15 * forehead_factor)
+
+            # Brow ridge (y 18-22): slight shadow
+            if 18 <= y <= 22:
+                brow_factor = _gauss(y - 20.0, 2.5) * _gauss(x - cx, 16.0)
+                face_val = face_val * (1.0 - 0.3 * brow_factor) + 0.35 * brow_factor
+
+            # Eye sockets (y 22-30): dark regions
+            left_eye_cx: float = 22.0
+            right_eye_cx: float = 42.0
+            eye_cy: float = 26.0
+
+            for ecx in (left_eye_cx, right_eye_cx):
+                ex_dist = ((x - ecx) / 5.0) ** 2 + ((y - eye_cy) / 3.5) ** 2
+                if ex_dist < 1.0:
+                    # Inside eye socket
+                    socket_depth = (1.0 - ex_dist) * 0.7
+                    face_val = face_val * (1.0 - socket_depth) + 0.12 * socket_depth
+
+                    # Eye whites/iris — bright spots inside the sockets
+                    iris_dist = ((x - ecx) / 3.0) ** 2 + ((y - eye_cy) / 2.5) ** 2
+                    if iris_dist < 1.0:
+                        iris_bright = (1.0 - iris_dist)
+                        face_val = face_val + iris_bright * 0.75
+                        face_val = min(face_val, 0.95)
+
+                    # Pupil center — 3x3ish dark spot
+                    pupil_dist = abs(x - ecx) + abs(y - eye_cy)
+                    if pupil_dist < 1.8:
+                        face_val = 0.0
+
+            # Nose bridge (y 28-38): narrow bright vertical strip
+            if 28 <= y <= 38:
+                nose_factor = _gauss(x - cx, 3.5) * _gauss(y - 33.0, 6.0)
+                face_val = max(face_val, 0.50 + 0.15 * nose_factor)
+
+            # Cheekbones (y 30-38): moderate brightness on sides
+            if 30 <= y <= 38:
+                for cheek_x in (cx - 12.0, cx + 12.0):
+                    cheek_factor = _gauss(x - cheek_x, 5.0) * _gauss(y - 34.0, 4.0)
+                    face_val = max(face_val, 0.40 + 0.15 * cheek_factor)
+
+            # Mouth area (y 40-44): dark band
+            if 40 <= y <= 44:
+                mouth_factor = _gauss(x - cx, 10.0) * _gauss(y - 42.0, 2.5)
+                mouth_dark = 0.20 * mouth_factor
+                face_val = face_val * (1.0 - mouth_factor) + mouth_dark
+
+            # Chin (y 44-52)
+            if 44 <= y <= 52:
+                chin_factor = _gauss(x - cx, 14.0) * _gauss(y - 48.0, 5.0)
+                face_val = max(face_val, 0.35 + 0.10 * chin_factor)
+
+            # Clamp and add organic noise
+            face_val = _clamp(face_val, 0.0, 1.0)
+            face_val += random.uniform(-0.05, 0.05)
+            face_val = _clamp(face_val, 0.0, 1.0)
+
+            row.append(face_val)
+        fmap.append(row)
+    return fmap
 
 
 # ---------------------------------------------------------------------------
@@ -254,44 +197,60 @@ def _lerp_state(current: CharacterState, target: CharacterState, t: float) -> Ch
 # ---------------------------------------------------------------------------
 
 class CharacterTheme(ThemeRenderer):
-    """Chunky pixel robot character with personality-driven animations."""
+    """Dithered pixel portrait — a face emerging from probabilistic colored noise."""
 
     def __init__(self, width: int = 64, height: int = 64) -> None:
         super().__init__(width, height)
-        self._colors: dict[str, tuple[int, int, int]] = COLOR_SCHEMES[0]
-        self._state = CharacterState()
-        self._target = CharacterState()
+
+        # Face brightness template — built in on_activate
+        self._face_map: list[list[float]] = []
+        self._base_face_map: list[list[float]] = []  # unmodified copy
+
+        # Palette (set in on_activate)
+        self._palette: list[tuple[int, int, int]] = PALETTE_VARIANTS[0]
+        self._active_palette: list[tuple[int, int, int]] = list(self._palette)
+
+        # Previous frame buffer for shimmer holdover
+        self._prev_frame: list[tuple[int, int, int]] = [
+            (0, 0, 0) for _ in range(width * height)
+        ]
+
+        # Shimmer intensity
+        self._shimmer: float = 1.0
+
+        # Time accumulator
         self._time: float = 0.0
 
-        # Blink tracking
+        # Blink state
         self._next_blink_at: float = 0.0
         self._blink_started_at: float | None = None
 
-        # Sarcastic squint tracking
+        # Squint state
         self._next_squint_at: float = 0.0
         self._squint_started_at: float | None = None
-        self._squint_eye: str = "left"  # which eye squints
+        self._squint_eye: str = "left"
 
-        # Idle pupil drift target
-        self._drift_target_x: float = 0.0
-        self._drift_target_y: float = 0.0
+        # Pupil drift
+        self._pupil_offset_x: float = 0.0
+        self._pupil_offset_y: float = 0.0
+        self._pupil_target_x: float = 0.0
+        self._pupil_target_y: float = 0.0
         self._next_drift_at: float = 0.0
 
-        # Speaking mouth cycle
+        # Speaking mouth phase
         self._speak_phase: float = 0.0
 
-        # Happy bounce / leg kick
-        self._happy_phase: float = 0.0
+        # Listening face shift
+        self._listen_shift: int = 0
 
-        # Sleep Z particles
-        self._z_particles: list[_ZParticle] = []
-        self._next_z_at: float = 0.0
+        # Error glitch offsets per row
+        self._error_offsets: list[int] = [0] * height
 
-        # Sleep flutter
-        self._next_flutter_at: float = 0.0
-        self._flutter_started_at: float | None = None
+        # Sleeping firefly
+        self._firefly_pixels: list[tuple[int, int, float]] = []  # (x, y, remaining_life)
 
-        self._reset_timers()
+        # Thinking scan offset
+        self._think_scan_offset: int = 0
 
     # ------------------------------------------------------------------
     # ThemeRenderer interface
@@ -302,352 +261,468 @@ class CharacterTheme(ThemeRenderer):
         return "Character"
 
     def on_activate(self) -> None:
-        self._colors = random.choice(COLOR_SCHEMES)
-        self._state = CharacterState()
-        self._target = CharacterState()
+        self._palette = random.choice(PALETTE_VARIANTS)
+        self._active_palette = list(self._palette)
+        self._base_face_map = _build_face_map(self.width, self.height)
+        self._face_map = [row[:] for row in self._base_face_map]
+        self._prev_frame = [(0, 0, 0)] * (self.width * self.height)
+        self._shimmer = 1.0
         self._time = 0.0
-        self._z_particles = []
         self._speak_phase = 0.0
-        self._happy_phase = 0.0
-        self._reset_timers()
-
-    def on_deactivate(self) -> None:
-        self._z_particles = []
-
-    def set_state(self, state: FaceState) -> None:
-        super().set_state(state)
-        self._target = CharacterState(
-            **{f.name: getattr(_STATE_TARGETS[state], f.name) for f in fields(CharacterState)}
-        )
-        # Reset speak phase on entering speaking
-        if state == FaceState.SPEAKING:
-            self._speak_phase = 0.0
-        if state == FaceState.HAPPY:
-            self._happy_phase = 0.0
-        if state == FaceState.IDLE:
-            self._reset_timers()
-
-    # ------------------------------------------------------------------
-    # Drawing
-    # ------------------------------------------------------------------
-
-    def draw_frame(self, dt: float) -> Image.Image:
-        now = time.monotonic()
-        self._time += dt
-
-        # 1. Smooth interpolation toward target
-        self._state = _lerp_state(self._state, self._target, 0.10)
-
-        # 2. Apply state-specific behaviours
-        self._apply_idle_behaviours(now, dt)
-        self._apply_speaking_behaviours(dt)
-        self._apply_happy_behaviours(dt)
-        self._apply_sleeping_behaviours(now, dt)
-        self._apply_idle_bounce(dt)
-
-        # 3. Render
-        img = Image.new("RGB", (self.width, self.height), BG_COLOR)
-        draw = ImageDraw.Draw(img)
-
-        by = int(round(self._state.body_y_offset))
-
-        self._draw_hat(draw, by)
-        self._draw_face(draw, by)
-        self._draw_eyes(draw, by)
-        self._draw_mouth(draw, by)
-        self._draw_legs(draw, by)
-
-        # Sleep Z particles on top
-        if self._current_state == FaceState.SLEEPING:
-            self._draw_z_particles(draw, dt)
-
-        return img
-
-    # ------------------------------------------------------------------
-    # State-specific behaviour updates
-    # ------------------------------------------------------------------
-
-    def _reset_timers(self) -> None:
+        self._listen_shift = 0
+        self._error_offsets = [0] * self.height
+        self._firefly_pixels = []
+        self._think_scan_offset = 0
+        self._pupil_offset_x = 0.0
+        self._pupil_offset_y = 0.0
+        self._pupil_target_x = 0.0
+        self._pupil_target_y = 0.0
         now = time.monotonic()
         self._next_blink_at = now + random.uniform(3.0, 7.0)
         self._blink_started_at = None
         self._next_squint_at = now + random.uniform(10.0, 20.0)
         self._squint_started_at = None
         self._next_drift_at = now + random.uniform(1.0, 3.0)
-        self._drift_target_x = 0.0
-        self._drift_target_y = 0.0
-        self._next_z_at = now + random.uniform(0.5, 1.5)
-        self._next_flutter_at = now + random.uniform(4.0, 8.0)
-        self._flutter_started_at = None
 
-    def _apply_idle_behaviours(self, now: float, dt: float) -> None:
-        """Blink, pupil drift, and sarcastic squint for IDLE state."""
-        if self._current_state != FaceState.IDLE:
+    def on_deactivate(self) -> None:
+        self._firefly_pixels = []
+
+    def set_state(self, state: FaceState) -> None:
+        super().set_state(state)
+        if state == FaceState.SPEAKING:
+            self._speak_phase = 0.0
+        if state == FaceState.IDLE:
+            now = time.monotonic()
+            self._next_blink_at = now + random.uniform(3.0, 7.0)
             self._blink_started_at = None
+            self._next_squint_at = now + random.uniform(10.0, 20.0)
             self._squint_started_at = None
-            return
+            self._next_drift_at = now + random.uniform(1.0, 3.0)
 
+    # ------------------------------------------------------------------
+    # Frame rendering
+    # ------------------------------------------------------------------
+
+    def draw_frame(self, dt: float) -> Image.Image:
+        self._time += dt
+        now: float = time.monotonic()
+        state: FaceState = self._current_state
+        w: int = self.width
+        h: int = self.height
+
+        # Rebuild the working face map from the base each frame
+        face_map: list[list[float]] = [row[:] for row in self._base_face_map]
+
+        # --- Apply state-specific modifications to the face map ---
+        self._apply_state_modifiers(face_map, state, now, dt)
+
+        # --- Determine active palette ---
+        palette: list[tuple[int, int, int]] = self._get_state_palette(state)
+
+        # --- Determine shimmer ---
+        shimmer: float = self._get_state_shimmer(state)
+        self._shimmer = shimmer
+
+        # --- Determine brightness multiplier ---
+        brightness_mult: float = self._get_brightness_multiplier(state)
+
+        # --- Build the pixel buffer ---
+        new_frame: list[tuple[int, int, int]] = list(self._prev_frame)
+
+        for y in range(h):
+            # Error state: horizontal glitch offset
+            x_offset: int = 0
+            if state == FaceState.ERROR:
+                x_offset = self._error_offsets[y]
+
+            # Thinking state: scan line dimming
+            scan_dim: float = 0.0
+            if state == FaceState.THINKING:
+                if (y + self._think_scan_offset) % 2 == 0:
+                    scan_dim = 0.1
+
+            for x in range(w):
+                idx: int = y * w + x
+
+                # Shimmer check — should we re-randomize this pixel?
+                if random.random() >= shimmer:
+                    # Keep previous color
+                    continue
+
+                # Source coordinates (with possible glitch offset)
+                sx: int = x - x_offset
+                if sx < 0 or sx >= w:
+                    # Off-screen due to glitch — use background brightness
+                    b = 0.02
+                else:
+                    b = face_map[y][sx]
+
+                # Apply brightness multiplier
+                b = _clamp(b * brightness_mult - scan_dim, 0.0, 1.0)
+
+                # Pick color probabilistically
+                r_val: float = random.random()
+                color: tuple[int, int, int] = _pick_color(b, r_val, palette)
+                new_frame[idx] = color
+
+        self._prev_frame = new_frame
+
+        # Build the image from the flat pixel list
+        pixel_bytes: bytearray = bytearray(w * h * 3)
+        for i, (cr, cg, cb) in enumerate(new_frame):
+            off = i * 3
+            pixel_bytes[off] = cr
+            pixel_bytes[off + 1] = cg
+            pixel_bytes[off + 2] = cb
+
+        img: Image.Image = Image.frombytes("RGB", (w, h), bytes(pixel_bytes))
+        return img
+
+    # ------------------------------------------------------------------
+    # State modifiers — adjust face_map per state each frame
+    # ------------------------------------------------------------------
+
+    def _apply_state_modifiers(
+        self,
+        face_map: list[list[float]],
+        state: FaceState,
+        now: float,
+        dt: float,
+    ) -> None:
+        if state == FaceState.IDLE:
+            self._apply_idle(face_map, now, dt)
+        elif state == FaceState.LISTENING:
+            self._apply_listening(face_map, now, dt)
+        elif state == FaceState.THINKING:
+            self._apply_thinking(face_map, now, dt)
+        elif state == FaceState.SPEAKING:
+            self._apply_speaking(face_map, now, dt)
+        elif state == FaceState.ERROR:
+            self._apply_error(face_map, now, dt)
+        elif state == FaceState.HAPPY:
+            self._apply_happy(face_map, now, dt)
+        elif state == FaceState.SLEEPING:
+            self._apply_sleeping(face_map, now, dt)
+
+    # --- Eye region helpers ---
+
+    _LEFT_EYE_CX: int = 22
+    _RIGHT_EYE_CX: int = 42
+    _EYE_CY: int = 26
+    _EYE_RX: int = 4   # half-width of eye region
+    _EYE_RY: int = 3   # half-height of eye region
+
+    _MOUTH_CX: int = 32
+    _MOUTH_CY: int = 42
+    _MOUTH_RX: int = 10
+    _MOUTH_RY: int = 2
+
+    def _set_eye_region(
+        self,
+        face_map: list[list[float]],
+        ecx: int,
+        ecy: int,
+        mode: str,
+        pupil_ox: float = 0.0,
+        pupil_oy: float = 0.0,
+    ) -> None:
+        """Modify the face_map in an eye region.
+
+        *mode*: ``"open"``, ``"closed"``, ``"half"``, ``"bright"``, ``"happy"``
+        """
+        rx: int = self._EYE_RX
+        ry: int = self._EYE_RY
+
+        for y in range(ecy - ry, ecy + ry + 1):
+            for x in range(ecx - rx, ecx + rx + 1):
+                if y < 0 or y >= self.height or x < 0 or x >= self.width:
+                    continue
+
+                if mode == "closed":
+                    face_map[y][x] = 0.10
+                elif mode == "half":
+                    # Top half dark, bottom half bright
+                    if y < ecy:
+                        face_map[y][x] = 0.10
+                    else:
+                        face_map[y][x] = 0.80
+                elif mode == "happy":
+                    # ^_^ shape: bright bottom, dark top
+                    if y >= ecy:
+                        face_map[y][x] = 0.85
+                    else:
+                        face_map[y][x] = 0.10
+                elif mode == "bright":
+                    # Extra bright (listening)
+                    dist = ((x - ecx) / 3.0) ** 2 + ((y - ecy) / 2.5) ** 2
+                    if dist < 1.0:
+                        face_map[y][x] = 0.95
+                    else:
+                        face_map[y][x] = 0.15
+                    # Pupil
+                    px = ecx + int(round(pupil_ox))
+                    py = ecy + int(round(pupil_oy))
+                    if abs(x - px) <= 1 and abs(y - py) <= 1:
+                        face_map[y][x] = 0.0
+                elif mode == "open":
+                    # Standard open eye — restore from base but adjust pupil position
+                    dist = ((x - ecx) / 3.0) ** 2 + ((y - ecy) / 2.5) ** 2
+                    if dist < 1.0:
+                        iris_bright = (1.0 - dist) * 0.75
+                        face_map[y][x] = max(0.15, iris_bright + 0.15)
+                        face_map[y][x] = min(face_map[y][x], 0.95)
+                    else:
+                        face_map[y][x] = 0.15
+
+                    # Shifted pupil
+                    px = ecx + int(round(pupil_ox))
+                    py = ecy + int(round(pupil_oy))
+                    pdist = abs(x - px) + abs(y - py)
+                    if pdist < 1.8:
+                        face_map[y][x] = 0.0
+
+    def _set_mouth_region(
+        self,
+        face_map: list[list[float]],
+        brightness: float,
+        width_factor: float = 1.0,
+    ) -> None:
+        """Set mouth region brightness."""
+        cx: int = self._MOUTH_CX
+        cy: int = self._MOUTH_CY
+        rx: int = int(self._MOUTH_RX * width_factor)
+        ry: int = self._MOUTH_RY
+
+        for y in range(cy - ry, cy + ry + 1):
+            for x in range(cx - rx, cx + rx + 1):
+                if 0 <= y < self.height and 0 <= x < self.width:
+                    face_map[y][x] = brightness
+
+    # --- Per-state logic ---
+
+    def _apply_idle(
+        self,
+        face_map: list[list[float]],
+        now: float,
+        dt: float,
+    ) -> None:
+        """Normal idle: blinks, pupil drift, occasional squint."""
         # --- Blink ---
+        blink_active: bool = False
         if self._blink_started_at is not None:
             elapsed = now - self._blink_started_at
             if elapsed < 0.10:
-                # Eyes closed during blink
-                self._state.left_eye_height = 0.0
-                self._state.right_eye_height = 0.0
+                blink_active = True
             else:
-                # Blink done
                 self._blink_started_at = None
                 self._next_blink_at = now + random.uniform(3.0, 7.0)
         elif now >= self._next_blink_at:
             self._blink_started_at = now
-            self._state.left_eye_height = 0.0
-            self._state.right_eye_height = 0.0
+            blink_active = True
+
+        if blink_active:
+            self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "closed")
+            self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "closed")
+            return
 
         # --- Sarcastic squint ---
+        squint_eye: str | None = None
         if self._squint_started_at is not None:
             elapsed = now - self._squint_started_at
             if elapsed < 1.0:
-                if self._squint_eye == "left":
-                    self._state.left_eye_height = _lerp(
-                        self._state.left_eye_height, 0.5, 0.15,
-                    )
-                else:
-                    self._state.right_eye_height = _lerp(
-                        self._state.right_eye_height, 0.5, 0.15,
-                    )
+                squint_eye = self._squint_eye
             else:
                 self._squint_started_at = None
                 self._next_squint_at = now + random.uniform(10.0, 20.0)
         elif now >= self._next_squint_at:
             self._squint_started_at = now
             self._squint_eye = random.choice(["left", "right"])
+            squint_eye = self._squint_eye
 
         # --- Pupil drift ---
         if now >= self._next_drift_at:
-            self._drift_target_x = random.uniform(-2.0, 2.0)
-            self._drift_target_y = random.uniform(-1.5, 1.5)
+            self._pupil_target_x = random.uniform(-2.0, 2.0)
+            self._pupil_target_y = random.uniform(-1.5, 1.5)
             self._next_drift_at = now + random.uniform(2.0, 4.0)
 
-        self._state.left_pupil_x = _lerp(self._state.left_pupil_x, self._drift_target_x, 0.03)
-        self._state.left_pupil_y = _lerp(self._state.left_pupil_y, self._drift_target_y, 0.03)
-        self._state.right_pupil_x = _lerp(self._state.right_pupil_x, self._drift_target_x, 0.03)
-        self._state.right_pupil_y = _lerp(self._state.right_pupil_y, self._drift_target_y, 0.03)
+        self._pupil_offset_x += (self._pupil_target_x - self._pupil_offset_x) * 0.03
+        self._pupil_offset_y += (self._pupil_target_y - self._pupil_offset_y) * 0.03
 
-    def _apply_idle_bounce(self, dt: float) -> None:
-        """Gentle body bounce and leg sway in IDLE."""
-        if self._current_state != FaceState.IDLE:
-            return
-        # Body bounce: +-1px at ~0.5Hz
-        bounce = math.sin(self._time * math.pi) * 1.0
-        self._state.body_y_offset = _lerp(self._state.body_y_offset, bounce, 0.08)
-        # Leg sway: gentle alternating angles
-        self._state.left_leg_angle = _lerp(
-            self._state.left_leg_angle,
-            math.sin(self._time * 1.2) * 0.1,
-            0.06,
+        # Set eyes
+        left_mode = "half" if squint_eye == "left" else "open"
+        right_mode = "half" if squint_eye == "right" else "open"
+        self._set_eye_region(
+            face_map, self._LEFT_EYE_CX, self._EYE_CY, left_mode,
+            self._pupil_offset_x, self._pupil_offset_y,
         )
-        self._state.right_leg_angle = _lerp(
-            self._state.right_leg_angle,
-            math.sin(self._time * 1.2 + math.pi) * 0.1,
-            0.06,
+        self._set_eye_region(
+            face_map, self._RIGHT_EYE_CX, self._EYE_CY, right_mode,
+            self._pupil_offset_x, self._pupil_offset_y,
         )
 
-    def _apply_speaking_behaviours(self, dt: float) -> None:
-        """Mouth pulse and body bounce during SPEAKING."""
-        if self._current_state != FaceState.SPEAKING:
-            return
-        self._speak_phase += dt * 3.0 * math.tau  # ~3Hz
-        # Mouth width oscillates 0.8 -> 1.2 -> 0.8
-        mouth_target = 1.0 + 0.2 * math.sin(self._speak_phase)
-        self._state.mouth_width = _lerp(self._state.mouth_width, mouth_target, 0.2)
-        # Slight body bounce with speech
-        bounce = math.sin(self._speak_phase * 0.5) * 0.8
-        self._state.body_y_offset = _lerp(self._state.body_y_offset, bounce, 0.1)
+    def _apply_listening(
+        self,
+        face_map: list[list[float]],
+        now: float,
+        dt: float,
+    ) -> None:
+        """Listening: brighter face, wide eyes, face shifts up 1-2px."""
+        # Shift the face map up by 1 pixel (lean forward)
+        if self._listen_shift < 2:
+            self._listen_shift = 2
 
-    def _apply_happy_behaviours(self, dt: float) -> None:
-        """Rapid bounce and alternating leg kicks during HAPPY."""
-        if self._current_state != FaceState.HAPPY:
-            return
-        self._happy_phase += dt * 2.0 * math.tau  # ~2Hz
-        # Body bounce +-2px
-        self._state.body_y_offset = math.sin(self._happy_phase) * 2.0
-        # Alternating leg kicks
-        self._state.left_leg_angle = math.sin(self._happy_phase) * 0.3
-        self._state.right_leg_angle = math.sin(self._happy_phase + math.pi) * 0.3
+        # Shift is handled by brightness multiplier + eye brightness
+        # Wide open, bright eyes with centered pupils
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "bright", 0.0, 0.0)
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "bright", 0.0, 0.0)
 
-    def _apply_sleeping_behaviours(self, now: float, dt: float) -> None:
-        """Eye flutter and Z particle spawning during SLEEPING."""
-        if self._current_state != FaceState.SLEEPING:
-            self._z_particles = []
-            return
+        # Shift brightness map up by 1-2 rows
+        for y in range(self.height - 2):
+            face_map[y] = face_map[y + 2][:]
+        face_map[self.height - 2] = [0.0] * self.width
+        face_map[self.height - 1] = [0.0] * self.width
 
-        # Eye flutter
-        if self._flutter_started_at is not None:
-            elapsed = now - self._flutter_started_at
-            if elapsed < 0.15:
-                self._state.left_eye_height = 0.2
-                self._state.right_eye_height = 0.2
-            else:
-                self._flutter_started_at = None
-                self._next_flutter_at = now + random.uniform(4.0, 8.0)
-        elif now >= self._next_flutter_at:
-            self._flutter_started_at = now
+    def _apply_thinking(
+        self,
+        face_map: list[list[float]],
+        now: float,
+        dt: float,
+    ) -> None:
+        """Thinking: darkened face, pupils up-left, CRT scan lines."""
+        # Pupils up-left
+        self._set_eye_region(
+            face_map, self._LEFT_EYE_CX, self._EYE_CY, "open", -2.0, -1.5,
+        )
+        self._set_eye_region(
+            face_map, self._RIGHT_EYE_CX, self._EYE_CY, "open", -2.0, -1.5,
+        )
 
-        # Spawn Z particles
-        if now >= self._next_z_at:
-            self._z_particles.append(_ZParticle(
-                x=float(CANVAS // 2 + 18 + random.randint(-2, 2)),
-                y=float(FACE_Y - 2),
-            ))
-            self._next_z_at = now + random.uniform(1.0, 2.0)
+        # Advance scan line offset
+        self._think_scan_offset = int(self._time * 8) % 2
 
-        # Update existing particles
-        alive: list[_ZParticle] = []
-        for zp in self._z_particles:
-            zp.age += dt
-            zp.y -= dt * 6.0  # float upward
-            zp.x += math.sin(zp.age * 2.0) * dt * 3.0  # gentle sway
-            if zp.age < zp.lifetime and zp.y > 0:
-                alive.append(zp)
-        self._z_particles = alive
+    def _apply_speaking(
+        self,
+        face_map: list[list[float]],
+        now: float,
+        dt: float,
+    ) -> None:
+        """Speaking: mouth oscillates, slight face brightness pulse."""
+        self._speak_phase += dt * 3.0 * math.tau  # ~3 Hz
+
+        # Mouth brightness oscillates 0.20 -> 0.50 -> 0.20
+        mouth_b: float = 0.20 + 0.30 * (0.5 + 0.5 * math.sin(self._speak_phase))
+        self._set_mouth_region(face_map, mouth_b, 1.0)
+
+        # Eyes normal, centered pupils
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "open", 0.0, 0.0)
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "open", 0.0, 0.0)
+
+    def _apply_error(
+        self,
+        face_map: list[list[float]],
+        now: float,
+        dt: float,
+    ) -> None:
+        """Error: glitch offsets, asymmetric eyes, distorted."""
+        # Random horizontal offsets per row (glitch)
+        for y in range(self.height):
+            self._error_offsets[y] = random.randint(-2, 2)
+
+        # Asymmetric eyes — left bright, right dark
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "bright", 2.0, 0.0)
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "closed")
+
+    def _apply_happy(
+        self,
+        face_map: list[list[float]],
+        now: float,
+        dt: float,
+    ) -> None:
+        """Happy: warm palette, bright face, ^_^ eyes, wide mouth."""
+        # ^_^ eyes
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "happy")
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "happy")
+
+        # Wide bright mouth
+        self._set_mouth_region(face_map, 0.50, 1.3)
+
+    def _apply_sleeping(
+        self,
+        face_map: list[list[float]],
+        now: float,
+        dt: float,
+    ) -> None:
+        """Sleeping: low shimmer, dark, eyes closed, firefly sparks."""
+        # Eyes closed
+        self._set_eye_region(face_map, self._LEFT_EYE_CX, self._EYE_CY, "closed")
+        self._set_eye_region(face_map, self._RIGHT_EYE_CX, self._EYE_CY, "closed")
+
+        # Firefly pixels — occasionally spawn one
+        if random.random() < 0.02:
+            # Pick a random pixel that's inside the face (brightness > 0.1)
+            fx = random.randint(10, 53)
+            fy = random.randint(5, 55)
+            if self._base_face_map[fy][fx] > 0.1:
+                self._firefly_pixels.append((fx, fy, 0.5))
+
+        # Update and apply fireflies
+        alive: list[tuple[int, int, float]] = []
+        for fx, fy, life in self._firefly_pixels:
+            new_life = life - dt
+            if new_life > 0:
+                alive.append((fx, fy, new_life))
+                # Brighten this pixel in the face map
+                face_map[fy][fx] = min(1.0, face_map[fy][fx] + life * 1.5)
+        self._firefly_pixels = alive
 
     # ------------------------------------------------------------------
-    # Rendering helpers
+    # State-dependent palette, shimmer, brightness
     # ------------------------------------------------------------------
 
-    def _draw_hat(self, draw: ImageDraw.ImageDraw, by: int) -> None:
-        y = HAT_Y + by + int(round(self._state.hat_y_offset))
-        x = HAT_X
-        draw.rectangle([x, y, x + HAT_WIDTH - 1, y + HAT_HEIGHT - 1], fill=self._colors["hat"])
+    def _get_state_palette(self, state: FaceState) -> list[tuple[int, int, int]]:
+        """Return the active palette, possibly modified by state."""
+        p = list(self._palette)
+        if state == FaceState.ERROR:
+            # Replace mid-dark with brighter red, desaturate cyan
+            p[1] = (255, 0, 0)
+            p[2] = (120, 140, 150)  # desaturated cyan
+        elif state == FaceState.HAPPY:
+            # Warm shift: red -> orange, cyan -> yellow
+            p[1] = (255, 140, 0)
+            p[2] = (255, 230, 50)
+        return p
 
-    def _draw_face(self, draw: ImageDraw.ImageDraw, by: int) -> None:
-        y = FACE_Y + by
-        draw.rectangle([FACE_X, y, FACE_X + FACE_WIDTH - 1, y + FACE_HEIGHT - 1], fill=self._colors["face"])
+    def _get_state_shimmer(self, state: FaceState) -> float:
+        """Return shimmer intensity for the current state."""
+        if state == FaceState.SLEEPING:
+            return 0.2
+        if state == FaceState.IDLE:
+            return 1.0
+        if state == FaceState.LISTENING:
+            return 1.0
+        if state == FaceState.THINKING:
+            return 1.0
+        if state == FaceState.SPEAKING:
+            return 1.0
+        if state == FaceState.ERROR:
+            return 1.0
+        if state == FaceState.HAPPY:
+            return 1.0
+        return 1.0
 
-    def _draw_eyes(self, draw: ImageDraw.ImageDraw, by: int) -> None:
-        is_happy = self._current_state == FaceState.HAPPY
-        self._draw_single_eye(
-            draw, EYE_LEFT_X, EYE_Y + by,
-            self._state.left_eye_height,
-            self._state.left_pupil_x, self._state.left_pupil_y,
-            is_happy,
-        )
-        self._draw_single_eye(
-            draw, EYE_RIGHT_X, EYE_Y + by,
-            self._state.right_eye_height,
-            self._state.right_pupil_x, self._state.right_pupil_y,
-            is_happy,
-        )
-
-    def _draw_single_eye(
-        self,
-        draw: ImageDraw.ImageDraw,
-        ex: int,
-        ey: int,
-        height_factor: float,
-        pupil_ox: float,
-        pupil_oy: float,
-        happy: bool,
-    ) -> None:
-        """Draw one eye with its pupil."""
-        if height_factor < 0.05:
-            # Eye fully closed — draw thin slit
-            mid_y = ey + EYE_HEIGHT // 2
-            draw.rectangle([ex, mid_y, ex + EYE_WIDTH - 1, mid_y], fill=EYE_COLOR)
-            return
-
-        actual_h = max(1, int(round(EYE_HEIGHT * _clamp(height_factor, 0.0, 1.2))))
-
-        if happy and height_factor < 0.5:
-            # Happy crescent: thin filled bar at the BOTTOM of the eye area (^_^ shape)
-            crescent_h = max(1, min(actual_h, 3))
-            cy = ey + EYE_HEIGHT - crescent_h
-            draw.rectangle([ex, cy, ex + EYE_WIDTH - 1, cy + crescent_h - 1], fill=EYE_COLOR)
-            return
-
-        # Normal eye: white rectangle, vertically centered in the eye area
-        y_offset = (EYE_HEIGHT - actual_h) // 2
-        ey_top = ey + y_offset
-        draw.rectangle([ex, ey_top, ex + EYE_WIDTH - 1, ey_top + actual_h - 1], fill=EYE_COLOR)
-
-        # Pupil: 3x3 black square centered in eye + offset, clamped inside
-        eye_cx = ex + EYE_WIDTH // 2
-        eye_cy = ey_top + actual_h // 2
-        px = int(round(eye_cx + pupil_ox)) - PUPIL_SIZE // 2
-        py = int(round(eye_cy + pupil_oy)) - PUPIL_SIZE // 2
-
-        # Clamp pupil inside the eye rectangle
-        px = int(_clamp(px, ex, ex + EYE_WIDTH - PUPIL_SIZE))
-        py = int(_clamp(py, ey_top, ey_top + actual_h - PUPIL_SIZE))
-
-        # Only draw pupil if the eye is open enough
-        if actual_h >= PUPIL_SIZE:
-            draw.rectangle([px, py, px + PUPIL_SIZE - 1, py + PUPIL_SIZE - 1], fill=PUPIL_COLOR)
-
-    def _draw_mouth(self, draw: ImageDraw.ImageDraw, by: int) -> None:
-        w = max(4, int(round(MOUTH_WIDTH * self._state.mouth_width)))
-        x = (CANVAS - w) // 2
-        y = MOUTH_Y + by + int(round(self._state.mouth_y_offset))
-
-        # During speaking, cycle between mouth color and accent color
-        if self._current_state == FaceState.SPEAKING:
-            cycle = math.sin(self._speak_phase) * 0.5 + 0.5  # 0..1
-            mc = self._colors["mouth"]
-            ac = self._colors["accent"]
-            color = (
-                int(mc[0] + (ac[0] - mc[0]) * cycle),
-                int(mc[1] + (ac[1] - mc[1]) * cycle),
-                int(mc[2] + (ac[2] - mc[2]) * cycle),
-            )
-        else:
-            color = self._colors["mouth"]
-
-        draw.rectangle([x, y, x + w - 1, y + MOUTH_HEIGHT - 1], fill=color)
-
-    def _draw_legs(self, draw: ImageDraw.ImageDraw, by: int) -> None:
-        self._draw_single_leg(
-            draw, LEG_LEFT_X, LEG_Y + by,
-            self._state.left_leg_angle, self._colors["leg_l"],
-        )
-        self._draw_single_leg(
-            draw, LEG_RIGHT_X, LEG_Y + by,
-            self._state.right_leg_angle, self._colors["leg_r"],
-        )
-
-    def _draw_single_leg(
-        self,
-        draw: ImageDraw.ImageDraw,
-        lx: int,
-        ly: int,
-        angle: float,
-        color: tuple[int, int, int],
-    ) -> None:
-        """Draw a leg as a polygon with the bottom offset by angle."""
-        # Top is fixed; bottom shifts horizontally by angle * height
-        bottom_shift = int(round(angle * LEG_HEIGHT))
-        # Four corners of the leg polygon
-        top_left = (lx, ly)
-        top_right = (lx + LEG_WIDTH - 1, ly)
-        bottom_right = (lx + LEG_WIDTH - 1 + bottom_shift, ly + LEG_HEIGHT - 1)
-        bottom_left = (lx + bottom_shift, ly + LEG_HEIGHT - 1)
-        draw.polygon([top_left, top_right, bottom_right, bottom_left], fill=color)
-
-    def _draw_z_particles(self, draw: ImageDraw.ImageDraw, dt: float) -> None:
-        """Draw small 'z' zigzag pixels floating upward."""
-        for zp in self._z_particles:
-            # Fade based on age
-            alpha = 1.0 - (zp.age / zp.lifetime)
-            brightness = int(_clamp(alpha * 255, 0, 255))
-            if brightness < 20:
-                continue
-            color = (brightness, brightness, brightness)
-            ix = int(round(zp.x))
-            iy = int(round(zp.y))
-            # Draw a tiny 'z' shape: 3 pixels in a zigzag
-            # Top-right, center, bottom-left
-            if 0 <= ix + 1 < CANVAS and 0 <= iy < CANVAS:
-                draw.point((ix + 1, iy), fill=color)
-            if 0 <= ix < CANVAS and 0 <= iy + 1 < CANVAS:
-                draw.point((ix, iy + 1), fill=color)
-            if 0 <= ix + 1 < CANVAS and 0 <= iy + 2 < CANVAS:
-                draw.point((ix + 1, iy + 2), fill=color)
+    def _get_brightness_multiplier(self, state: FaceState) -> float:
+        """Return overall brightness multiplier for the face map."""
+        if state == FaceState.LISTENING:
+            return 1.2
+        if state == FaceState.THINKING:
+            return 0.85
+        if state == FaceState.SPEAKING:
+            # Slight pulse with amplitude
+            return 1.0 + 0.15 * self._amplitude
+        if state == FaceState.ERROR:
+            return 1.0
+        if state == FaceState.HAPPY:
+            return 1.3
+        if state == FaceState.SLEEPING:
+            return 0.5
+        return 1.0
