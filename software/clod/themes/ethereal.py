@@ -1,14 +1,13 @@
-"""Ethereal Stripes theme — fragmented vertical color columns that drift and pixelate."""
+"""Ethereal theme — a field of cross/plus shapes drifting on a dark canvas."""
 
 from __future__ import annotations
 
 import logging
 import math
 import random
-from dataclasses import dataclass, field
-from typing import List, Tuple
+from dataclasses import dataclass
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from clod.events import FaceState
 from clod.themes.base import ThemeRenderer
@@ -16,40 +15,24 @@ from clod.themes.base import ThemeRenderer
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Color palette
+# Color palettes
 # ---------------------------------------------------------------------------
 
-STRIPE_COLORS: list[tuple[int, int, int]] = [
-    (180, 70, 70),     # dusty rose
-    (200, 135, 75),    # warm sand
-    (190, 180, 90),    # muted gold
-    (80, 150, 110),    # sage green
-    (70, 120, 180),    # slate blue
-    (110, 75, 160),    # soft purple
-    (160, 75, 120),    # muted mauve
-    (35, 35, 50),      # dark slate
-    (210, 210, 220),   # soft white
+PALETTE: list[tuple[int, int, int]] = [
+    (220, 70, 40),     # warm red
+    (240, 140, 30),    # orange
+    (240, 240, 240),   # white
+    (170, 170, 175),   # light gray
+    (110, 110, 115),   # medium gray
 ]
 
-# Darker palette for sleeping state — deep twilight tones
-SLEEPING_COLORS: list[tuple[int, int, int]] = [
-    (25, 20, 50),      # deep indigo
-    (40, 30, 70),      # dark purple
-    (20, 35, 65),      # midnight blue
-    (50, 25, 55),      # dark plum
-    (15, 30, 55),      # navy
-    (35, 40, 75),      # twilight blue
-    (45, 20, 45),      # dark berry
-    (10, 15, 35),      # near black blue
-    (55, 50, 80),      # dim lavender
-]
+BACKGROUND: tuple[int, int, int] = (38, 38, 43)  # charcoal
 
-# Thinking palette — restricted to 3-4 similar tones
-THINKING_COLORS: list[tuple[int, int, int]] = [
-    (70, 100, 165),    # medium blue
-    (85, 115, 180),    # lighter blue
-    (55, 80, 145),     # deeper blue
-    (95, 130, 190),    # soft blue
+SLEEPING_PALETTE: list[tuple[int, int, int]] = [
+    (60, 30, 25),      # dim red
+    (70, 55, 25),      # dim amber
+    (70, 70, 75),      # dim gray
+    (45, 45, 50),      # darker gray
 ]
 
 # ---------------------------------------------------------------------------
@@ -58,94 +41,110 @@ THINKING_COLORS: list[tuple[int, int, int]] = [
 
 
 @dataclass
-class Fragment:
-    """A single horizontal chunk of a column rendered with an x-offset."""
+class Shape:
+    """A single cross/plus shape on the canvas."""
 
-    y: int
-    height: int
-    x_offset: float
-
-
-@dataclass
-class Column:
-    """A vertical stripe that can fragment and drift across the canvas."""
-
-    x: float
-    width: int
+    x: float               # center position (fractional, 0-63)
+    y: float
+    vx: float              # velocity px/s
+    vy: float
+    size: int              # 0=dot, 1=tiny(3x3), 2=small(5x5), 3=medium(7x7)
     color: tuple[int, int, int]
-    fragmentation: float
-    drift_speed: float
-    phase: float  # unique oscillation phase for each column
-    fragments: list[Fragment] = field(default_factory=list)
+    opacity: float         # 0.0=invisible, 1.0=fully visible
+    age: float             # seconds alive
+    lifetime: float        # seconds until fade-out begins (-1 = immortal)
+    _fading_out: bool = False
+    _fade_out_timer: float = 0.0
+    _size_boost: int = 0          # temporary size increase for speaking pulse
+    _size_boost_timer: float = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Per-state target parameters
+# Shape drawing — pixel offsets for each cross size
 # ---------------------------------------------------------------------------
 
-@dataclass
-class _StateParams:
-    """Target values for a given FaceState."""
+# Each entry is a list of (dx, dy) offsets from center.
 
-    frag_min: float
-    frag_max: float
-    drift_min: float
-    drift_max: float
-    frag_osc_speed: float  # oscillation speed multiplier
-    brightness: float  # 0.0-1.0 color brightness multiplier
-    jitter: float  # per-frame random horizontal jitter for fragments
+_CROSS_DOT: list[tuple[int, int]] = [
+    (0, 0),
+]
 
+_CROSS_DOT_2X2: list[tuple[int, int]] = [
+    (0, 0), (1, 0), (0, 1), (1, 1),
+]
 
-_STATE_PARAMS: dict[FaceState, _StateParams] = {
-    FaceState.IDLE: _StateParams(
-        frag_min=0.0, frag_max=0.15,
-        drift_min=0.3, drift_max=1.2,
-        frag_osc_speed=0.3,
-        brightness=1.0,
-        jitter=0.0,
-    ),
-    FaceState.LISTENING: _StateParams(
-        frag_min=0.0, frag_max=0.0,
-        drift_min=0.0, drift_max=0.0,
-        frag_osc_speed=0.0,
-        brightness=1.1,
-        jitter=0.0,
-    ),
-    FaceState.THINKING: _StateParams(
-        frag_min=0.2, frag_max=0.45,
-        drift_min=1.5, drift_max=3.0,
-        frag_osc_speed=0.8,
-        brightness=1.0,
-        jitter=1.0,
-    ),
-    FaceState.SPEAKING: _StateParams(
-        frag_min=0.0, frag_max=0.3,
-        drift_min=0.4, drift_max=1.0,
-        frag_osc_speed=4.0,
-        brightness=1.0,
-        jitter=0.5,
-    ),
-    FaceState.ERROR: _StateParams(
-        frag_min=0.1, frag_max=0.25,
-        drift_min=0.1, drift_max=0.3,
-        frag_osc_speed=0.5,
-        brightness=0.85,
-        jitter=0.5,
-    ),
-    FaceState.HAPPY: _StateParams(
-        frag_min=0.05, frag_max=0.1,
-        drift_min=0.8, drift_max=1.5,
-        frag_osc_speed=0.0,
-        brightness=1.0,
-        jitter=0.0,
-    ),
-    FaceState.SLEEPING: _StateParams(
-        frag_min=0.0, frag_max=0.0,
-        drift_min=0.05, drift_max=0.1,
-        frag_osc_speed=0.0,
-        brightness=1.0,  # no dimming — dark colors handle this
-        jitter=0.0,
-    ),
+_CROSS_TINY: list[tuple[int, int]] = [
+    # .X.
+    # XXX
+    # .X.
+    (0, -1),
+    (-1, 0), (0, 0), (1, 0),
+    (0, 1),
+]
+
+_CROSS_SMALL: list[tuple[int, int]] = [
+    # ..X..
+    # ..X..
+    # XXXXX
+    # ..X..
+    # ..X..
+    (0, -2), (0, -1),
+    (-2, 0), (-1, 0), (0, 0), (1, 0), (2, 0),
+    (0, 1), (0, 2),
+]
+
+_CROSS_MEDIUM: list[tuple[int, int]] = [
+    # 2px-wide arms, 7 tall / 7 wide (actually 6 wide, 7 tall with 2px width)
+    # Vertical arm: columns -1,0 spanning rows -3 to +3
+    # Horizontal arm: rows -1,0 spanning columns -3 to +3
+    # Vertical arm (2px wide)
+    (-1, -3), (0, -3),
+    (-1, -2), (0, -2),
+    (-1, -1), (0, -1),
+    (-1, 0), (0, 0),
+    (-1, 1), (0, 1),
+    (-1, 2), (0, 2),
+    (-1, 3), (0, 3),
+    # Horizontal arm (2px tall) — skip center overlap already drawn
+    (-3, -1), (-3, 0),
+    (-2, -1), (-2, 0),
+    # (-1, -1), (-1, 0) already above
+    # (0, -1), (0, 0) already above
+    (1, -1), (1, 0),
+    (2, -1), (2, 0),
+    (3, -1), (3, 0),
+]
+
+_CROSS_PATTERNS: list[list[tuple[int, int]]] = [
+    _CROSS_DOT,      # size 0 — but we pick dot vs 2x2 at draw time
+    _CROSS_TINY,     # size 1
+    _CROSS_SMALL,    # size 2
+    _CROSS_MEDIUM,   # size 3
+]
+
+# ---------------------------------------------------------------------------
+# State configuration
+# ---------------------------------------------------------------------------
+
+_STATE_TARGET_COUNT: dict[FaceState, int] = {
+    FaceState.IDLE: 50,
+    FaceState.LISTENING: 35,
+    FaceState.THINKING: 70,
+    FaceState.SPEAKING: 50,
+    FaceState.ERROR: 25,
+    FaceState.HAPPY: 70,
+    FaceState.SLEEPING: 15,
+}
+
+# Size distribution weights per state: [dot, tiny, small, medium]
+_STATE_SIZE_WEIGHTS: dict[FaceState, list[float]] = {
+    FaceState.IDLE: [0.20, 0.40, 0.30, 0.10],
+    FaceState.LISTENING: [0.10, 0.25, 0.40, 0.25],
+    FaceState.THINKING: [0.35, 0.45, 0.15, 0.05],
+    FaceState.SPEAKING: [0.20, 0.40, 0.30, 0.10],
+    FaceState.ERROR: [0.50, 0.30, 0.15, 0.05],
+    FaceState.HAPPY: [0.15, 0.30, 0.35, 0.20],
+    FaceState.SLEEPING: [0.50, 0.50, 0.00, 0.00],
 }
 
 
@@ -153,117 +152,47 @@ _STATE_PARAMS: dict[FaceState, _StateParams] = {
 # Helper functions
 # ---------------------------------------------------------------------------
 
-def _lerp(a: float, b: float, t: float) -> float:
-    """Linear interpolation clamped to [a, b] range."""
-    return a + (b - a) * max(0.0, min(1.0, t))
-
-
-def _clamp(v: int, lo: int, hi: int) -> int:
+def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
 
-def _apply_brightness(
-    color: tuple[int, int, int], brightness: float
+def _weighted_choice(rng: random.Random, weights: list[float]) -> int:
+    """Return an index chosen by cumulative weights."""
+    r = rng.random()
+    cumulative = 0.0
+    for i, w in enumerate(weights):
+        cumulative += w
+        if r <= cumulative:
+            return i
+    return len(weights) - 1
+
+
+def _blend_color(
+    color: tuple[int, int, int],
+    bg: tuple[int, int, int],
+    opacity: float,
 ) -> tuple[int, int, int]:
+    """Blend color with background by opacity."""
+    inv = 1.0 - opacity
     return (
-        _clamp(int(color[0] * brightness), 0, 255),
-        _clamp(int(color[1] * brightness), 0, 255),
-        _clamp(int(color[2] * brightness), 0, 255),
+        int(color[0] * opacity + bg[0] * inv),
+        int(color[1] * opacity + bg[1] * inv),
+        int(color[2] * opacity + bg[2] * inv),
     )
 
 
-def _hue_shift(
-    color: tuple[int, int, int], shift: float
+def _desaturate(
+    color: tuple[int, int, int],
+    amount: float,
+    target: tuple[int, int, int] = (110, 110, 115),
 ) -> tuple[int, int, int]:
-    """Rotate the hue of *color* by *shift* (0.0-1.0)."""
-    r, g, b = color[0] / 255.0, color[1] / 255.0, color[2] / 255.0
-    max_c = max(r, g, b)
-    min_c = min(r, g, b)
-    diff = max_c - min_c
-
-    # Convert to HSV
-    if diff == 0:
-        h = 0.0
-    elif max_c == r:
-        h = ((g - b) / diff) % 6
-    elif max_c == g:
-        h = ((b - r) / diff) + 2
-    else:
-        h = ((r - g) / diff) + 4
-    h /= 6.0
-    s = 0.0 if max_c == 0 else diff / max_c
-    v = max_c
-
-    # Shift hue
-    h = (h + shift) % 1.0
-
-    # Convert back to RGB
-    i = int(h * 6.0)
-    f = h * 6.0 - i
-    p = v * (1.0 - s)
-    q = v * (1.0 - f * s)
-    t = v * (1.0 - (1.0 - f) * s)
-
-    i %= 6
-    if i == 0:
-        r2, g2, b2 = v, t, p
-    elif i == 1:
-        r2, g2, b2 = q, v, p
-    elif i == 2:
-        r2, g2, b2 = p, v, t
-    elif i == 3:
-        r2, g2, b2 = p, q, v
-    elif i == 4:
-        r2, g2, b2 = t, p, v
-    else:
-        r2, g2, b2 = v, p, q
-
+    """Blend a color toward a gray target by *amount* (0=original, 1=fully gray)."""
+    inv = 1.0 - amount
     return (
-        _clamp(int(r2 * 255), 0, 255),
-        _clamp(int(g2 * 255), 0, 255),
-        _clamp(int(b2 * 255), 0, 255),
+        int(color[0] * inv + target[0] * amount),
+        int(color[1] * inv + target[1] * amount),
+        int(color[2] * inv + target[2] * amount),
     )
-
-
-def _generate_fragments(
-    column_height: int, fragmentation: float, jitter: float
-) -> list[Fragment]:
-    """Create a list of fragments that tiles the full column height.
-
-    Fragment count grows with *fragmentation*; each fragment gets a random
-    horizontal offset scaled by *fragmentation* and *jitter*.
-    """
-    if fragmentation <= 0.0:
-        return []
-
-    num_fragments = int(fragmentation * 20) + 1
-    # Distribute heights to cover the full column
-    base_h = column_height // num_fragments
-    remainder = column_height - base_h * num_fragments
-
-    fragments: list[Fragment] = []
-    y = 0
-    for i in range(num_fragments):
-        h = base_h + (1 if i < remainder else 0)
-        h = max(1, min(h, 8))  # clamp to 1-8
-        if y >= column_height:
-            break
-        if y + h > column_height:
-            h = column_height - y
-        max_offset = fragmentation * (4.0 + jitter)
-        x_offset = random.uniform(-max_offset, max_offset)
-        fragments.append(Fragment(y=y, height=h, x_offset=x_offset))
-        y += h
-
-    # Fill any remaining gap at the bottom
-    while y < column_height:
-        h = min(column_height - y, max(2, int(random.uniform(2, 8))))
-        max_offset = fragmentation * (4.0 + jitter)
-        x_offset = random.uniform(-max_offset, max_offset)
-        fragments.append(Fragment(y=y, height=h, x_offset=x_offset))
-        y += h
-
-    return fragments
 
 
 # ---------------------------------------------------------------------------
@@ -272,20 +201,18 @@ def _generate_fragments(
 
 
 class EtherealTheme(ThemeRenderer):
-    """Ethereal Stripes — fragmented vertical color columns."""
+    """Ethereal — a drifting field of cross/plus shapes on charcoal."""
 
     def __init__(self, width: int = 64, height: int = 64) -> None:
         super().__init__(width, height)
-        self._columns: list[Column] = []
+        self._shapes: list[Shape] = []
         self._time: float = 0.0
-        self._transition_progress: float = 1.0  # 1.0 = fully transitioned
-        self._prev_params: _StateParams = _STATE_PARAMS[FaceState.IDLE]
-        self._target_params: _StateParams = _STATE_PARAMS[FaceState.IDLE]
-        self._error_flash_timer: float = 0.0
-        self._happy_hue_offset: float = 0.0
-        self._sleeping_pulse_col: int = 0
-        self._sleeping_pulse_timer: float = 0.0
-        self._rng = random.Random(42)
+        self._rng: random.Random = random.Random(42)
+        self._next_idle_swap: float = 0.0
+        self._speaking_wave_timer: float = 0.0
+        self._happy_burst_done: bool = False
+        self._sleeping_firefly_timer: float = 0.0
+        self._sleeping_firefly_idx: int = -1
 
     # ------------------------------------------------------------------
     # ThemeRenderer interface
@@ -296,204 +223,406 @@ class EtherealTheme(ThemeRenderer):
         return "Ethereal"
 
     def set_state(self, state: FaceState) -> None:
-        if state != self._current_state:
-            self._prev_params = self._effective_params()
-            self._target_params = _STATE_PARAMS.get(
-                state, _STATE_PARAMS[FaceState.IDLE]
-            )
-            self._transition_progress = 0.0
-            if state == FaceState.SLEEPING:
-                self._sleeping_pulse_col = self._rng.randint(
-                    0, max(0, len(self._columns) - 1)
-                )
-                self._sleeping_pulse_timer = 0.0
+        prev = self._current_state
         super().set_state(state)
+        if state != prev:
+            self._on_state_change(prev, state)
 
     def on_activate(self) -> None:
-        """Generate columns filling the 64-pixel canvas."""
-        self._columns = []
+        """Spawn 50-60 initial shapes randomly across the canvas."""
+        self._shapes = []
         self._time = 0.0
-        self._transition_progress = 1.0
-        self._prev_params = _STATE_PARAMS[FaceState.IDLE]
-        self._target_params = _STATE_PARAMS[FaceState.IDLE]
-        self._error_flash_timer = 0.0
-        self._happy_hue_offset = 0.0
-        self._sleeping_pulse_col = 0
-        self._sleeping_pulse_timer = 0.0
+        self._next_idle_swap = self._rng.uniform(2.0, 4.0)
+        self._speaking_wave_timer = 0.0
+        self._happy_burst_done = False
+        self._sleeping_firefly_timer = 0.0
+        self._sleeping_firefly_idx = -1
 
-        x = 0.0
-        color_index = 0
-        while x < self.width:
-            w = self._rng.randint(4, 8)
-            # Ensure last column fills remaining space
-            if x + w >= self.width:
-                w = self.width - int(x)
-                if w <= 0:
-                    break
-                w = max(w, 1)
-            color = STRIPE_COLORS[color_index % len(STRIPE_COLORS)]
-            color_index += 1
-            drift = self._rng.uniform(0.5, 2.0)
-            phase = self._rng.uniform(0.0, math.tau)
-            self._columns.append(
-                Column(
-                    x=x,
-                    width=w,
-                    color=color,
-                    fragmentation=0.0,
-                    drift_speed=drift,
-                    phase=phase,
-                )
-            )
-            x += w
-
-        logger.debug("EtherealTheme activated with %d columns", len(self._columns))
+        count = self._rng.randint(50, 60)
+        weights = _STATE_SIZE_WEIGHTS[FaceState.IDLE]
+        for _ in range(count):
+            self._shapes.append(self._spawn_shape(weights, PALETTE))
 
     def on_deactivate(self) -> None:
-        self._columns = []
+        self._shapes = []
 
     def draw_frame(self, dt: float) -> Image.Image:
         self._time += dt
+        state = self._current_state
 
-        # Advance transition (lerp over ~0.5 seconds)
-        if self._transition_progress < 1.0:
-            self._transition_progress = min(
-                1.0, self._transition_progress + dt / 0.5
-            )
+        # --- Physics & lifecycle ---
+        self._update_shapes(dt, state)
 
-        params = self._effective_params()
+        # --- State-specific behaviors ---
+        self._apply_state_behavior(dt, state)
 
-        # State-specific timers
-        self._error_flash_timer += dt
-        if self._current_state == FaceState.HAPPY:
-            self._happy_hue_offset += dt / 2.0  # full rotation in 2s
-        if self._current_state == FaceState.SLEEPING:
-            self._sleeping_pulse_timer += dt
+        # --- Manage population ---
+        self._manage_population(dt, state)
 
-        # Update columns
-        for i, col in enumerate(self._columns):
-            # Drift
-            target_drift = _lerp(
-                params.drift_min, params.drift_max,
-                (math.sin(self._time * 0.3 + col.phase) + 1.0) / 2.0,
-            )
-            col.drift_speed = _lerp(col.drift_speed, target_drift, min(1.0, dt * 3.0))
-            col.x = (col.x + col.drift_speed * dt) % self.width
-
-            # Fragmentation target
-            osc = (math.sin(self._time * params.frag_osc_speed + col.phase) + 1.0) / 2.0
-            target_frag = _lerp(params.frag_min, params.frag_max, osc)
-            col.fragmentation = _lerp(
-                col.fragmentation, target_frag, min(1.0, dt * 4.0)
-            )
-
-            # Generate fragments for this frame
-            col.fragments = _generate_fragments(
-                self.height, col.fragmentation, params.jitter
-            )
-
-        # Draw
-        img = Image.new("RGB", (self.width, self.height), (0, 0, 0))
-        draw = ImageDraw.Draw(img)
-
-        for i, col in enumerate(self._columns):
-            color = col.color
-
-            # SLEEPING: use dark twilight palette instead of dimming
-            if self._current_state == FaceState.SLEEPING:
-                color = SLEEPING_COLORS[i % len(SLEEPING_COLORS)]
-                # One column gently pulses slightly brighter
-                if i == self._sleeping_pulse_col:
-                    pulse = (math.sin(self._sleeping_pulse_timer * 1.0) + 1.0) / 2.0
-                    color = _apply_brightness(color, 1.0 + pulse * 0.6)
-
-            # THINKING: use restricted blue palette
-            elif self._current_state == FaceState.THINKING:
-                color = THINKING_COLORS[i % len(THINKING_COLORS)]
-
-            # HAPPY: gentle hue shift
-            elif self._current_state == FaceState.HAPPY:
-                color = _hue_shift(color, self._happy_hue_offset + i * 0.1)
-
-            # ERROR: desaturate and warm — columns slowly lose color
-            elif self._current_state == FaceState.ERROR:
-                # Blend toward a muted warm tone
-                warm = (140, 95, 70)  # dusty amber
-                blend = 0.4 + 0.2 * math.sin(self._error_flash_timer * 1.5 + i)
-                color = (
-                    int(color[0] * (1 - blend) + warm[0] * blend),
-                    int(color[1] * (1 - blend) + warm[1] * blend),
-                    int(color[2] * (1 - blend) + warm[2] * blend),
-                )
-
-            # Brightness adjustment
-            color = _apply_brightness(color, params.brightness)
-
-            # Draw the column (or its fragments)
-            self._draw_column(draw, col, color)
-
-        return img
+        # --- Render ---
+        return self._render()
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # State change handler
     # ------------------------------------------------------------------
 
-    def _effective_params(self) -> _StateParams:
-        """Return blended parameters between previous and target state."""
-        t = self._transition_progress
-        if t >= 1.0:
-            return self._target_params
-        p = self._prev_params
-        q = self._target_params
-        return _StateParams(
-            frag_min=_lerp(p.frag_min, q.frag_min, t),
-            frag_max=_lerp(p.frag_max, q.frag_max, t),
-            drift_min=_lerp(p.drift_min, q.drift_min, t),
-            drift_max=_lerp(p.drift_max, q.drift_max, t),
-            frag_osc_speed=_lerp(p.frag_osc_speed, q.frag_osc_speed, t),
-            brightness=_lerp(p.brightness, q.brightness, t),
-            jitter=_lerp(p.jitter, q.jitter, t),
+    def _on_state_change(self, prev: FaceState, new: FaceState) -> None:
+        """React to state transitions."""
+        if new == FaceState.HAPPY:
+            self._happy_burst_done = False
+        if new == FaceState.SLEEPING:
+            self._sleeping_firefly_timer = self._rng.uniform(2.0, 5.0)
+            self._sleeping_firefly_idx = -1
+
+    # ------------------------------------------------------------------
+    # Shape spawning
+    # ------------------------------------------------------------------
+
+    def _spawn_shape(
+        self,
+        size_weights: list[float],
+        palette: list[tuple[int, int, int]],
+        x: float | None = None,
+        y: float | None = None,
+        vx: float | None = None,
+        vy: float | None = None,
+        lifetime: float = -1.0,
+    ) -> Shape:
+        """Create a new shape with randomized properties."""
+        if x is None:
+            x = self._rng.uniform(0.0, 63.0)
+        if y is None:
+            y = self._rng.uniform(0.0, 63.0)
+        if vx is None:
+            vx = self._rng.uniform(-0.3, 0.3)
+        if vy is None:
+            vy = self._rng.uniform(-0.3, 0.3)
+        size = _weighted_choice(self._rng, size_weights)
+        color = palette[self._rng.randint(0, len(palette) - 1)]
+        if lifetime < 0:
+            lifetime = self._rng.uniform(8.0, 25.0)
+        return Shape(
+            x=x, y=y, vx=vx, vy=vy,
+            size=size, color=color,
+            opacity=0.0,  # fade in from 0
+            age=0.0, lifetime=lifetime,
         )
 
-    def _draw_column(
-        self,
-        draw: ImageDraw.ImageDraw,
-        col: Column,
-        color: tuple[int, int, int],
-    ) -> None:
-        """Draw a single column, handling wrapping and fragmentation."""
-        if col.fragmentation <= 0.0 or not col.fragments:
-            # Solid stripe — draw once or twice if wrapping
-            self._draw_rect_wrap(draw, col.x, 0, col.width, self.height, color)
-        else:
-            for frag in col.fragments:
-                fx = col.x + frag.x_offset
-                self._draw_rect_wrap(
-                    draw, fx, frag.y, col.width, frag.height, color
+    # ------------------------------------------------------------------
+    # Physics & lifecycle update
+    # ------------------------------------------------------------------
+
+    def _update_shapes(self, dt: float, state: FaceState) -> None:
+        """Advance positions, handle fading, remove dead shapes."""
+        to_remove: list[int] = []
+        for i, s in enumerate(self._shapes):
+            s.age += dt
+
+            # Fade in (first 0.3s)
+            if s.age < 0.3 and not s._fading_out:
+                s.opacity = min(1.0, s.age / 0.3)
+
+            # Check lifetime — begin fade out
+            if s.lifetime > 0 and s.age >= s.lifetime and not s._fading_out:
+                s._fading_out = True
+                s._fade_out_timer = 0.0
+
+            # Fade out over 0.5s
+            if s._fading_out:
+                s._fade_out_timer += dt
+                s.opacity = max(0.0, 1.0 - s._fade_out_timer / 0.5)
+                if s.opacity <= 0.0:
+                    to_remove.append(i)
+                    continue
+
+            # Size boost decay (speaking pulse)
+            if s._size_boost_timer > 0:
+                s._size_boost_timer -= dt
+                if s._size_boost_timer <= 0:
+                    s._size_boost = 0
+                    s._size_boost_timer = 0.0
+
+            # Move
+            s.x += s.vx * dt
+            s.y += s.vy * dt
+
+            # Wrap at edges
+            s.x = s.x % 64.0
+            s.y = s.y % 64.0
+
+        # Remove dead shapes (iterate in reverse to keep indices valid)
+        for i in reversed(to_remove):
+            self._shapes.pop(i)
+
+    # ------------------------------------------------------------------
+    # State-specific behaviors
+    # ------------------------------------------------------------------
+
+    def _apply_state_behavior(self, dt: float, state: FaceState) -> None:
+        if state == FaceState.IDLE:
+            self._behavior_idle(dt)
+        elif state == FaceState.LISTENING:
+            self._behavior_listening(dt)
+        elif state == FaceState.THINKING:
+            self._behavior_thinking(dt)
+        elif state == FaceState.SPEAKING:
+            self._behavior_speaking(dt)
+        elif state == FaceState.ERROR:
+            self._behavior_error(dt)
+        elif state == FaceState.HAPPY:
+            self._behavior_happy(dt)
+        elif state == FaceState.SLEEPING:
+            self._behavior_sleeping(dt)
+
+    def _behavior_idle(self, dt: float) -> None:
+        """Gentle breathing and occasional shape swap."""
+        # Breathing: opacity oscillates 0.85 - 1.0
+        breath = 0.85 + 0.15 * (math.sin(self._time * 1.2) + 1.0) / 2.0
+        for s in self._shapes:
+            if not s._fading_out and s.age >= 0.3:
+                s.opacity = breath
+
+        # Occasional swap: fade one out, spawn one elsewhere
+        self._next_idle_swap -= dt
+        if self._next_idle_swap <= 0:
+            self._next_idle_swap = self._rng.uniform(2.0, 4.0)
+            # Mark a random non-fading shape for death
+            candidates = [s for s in self._shapes if not s._fading_out]
+            if candidates:
+                victim = self._rng.choice(candidates)
+                victim._fading_out = True
+                victim._fade_out_timer = 0.0
+
+    def _behavior_listening(self, dt: float) -> None:
+        """Pull shapes toward center, dampen velocities, shift to white/gray."""
+        cx, cy = 32.0, 32.0
+        for s in self._shapes:
+            # Gentle pull toward center
+            s.vx += (cx - s.x) * 0.01 * dt * 60.0
+            s.vy += (cy - s.y) * 0.01 * dt * 60.0
+            # Dampen
+            s.vx *= (1.0 - 0.5 * dt)
+            s.vy *= (1.0 - 0.5 * dt)
+
+    def _behavior_thinking(self, dt: float) -> None:
+        """Orbital motion around center, faster drift, red/orange bias."""
+        cx, cy = 32.0, 32.0
+        for s in self._shapes:
+            dx = s.x - cx
+            dy = s.y - cy
+            dist = math.sqrt(dx * dx + dy * dy) + 0.01
+            # Tangential force (perpendicular to radial vector)
+            tx = -dy / dist
+            ty = dx / dist
+            force = 0.15
+            s.vx += tx * force * dt * 60.0
+            s.vy += ty * force * dt * 60.0
+            # Speed cap
+            speed = math.sqrt(s.vx * s.vx + s.vy * s.vy)
+            max_speed = 0.8
+            if speed > max_speed:
+                s.vx = s.vx / speed * max_speed
+                s.vy = s.vy / speed * max_speed
+
+    def _behavior_speaking(self, dt: float) -> None:
+        """Pulsing wave radiating from center every ~1s."""
+        self._speaking_wave_timer += dt
+        if self._speaking_wave_timer >= 1.0:
+            self._speaking_wave_timer -= 1.0
+            # Launch a wave: boost shapes near each radial distance band
+            cx, cy = 32.0, 32.0
+            wave_radius = 0.0  # starts at center
+            # We encode the wave as size boosts applied right now
+            # based on distance — shapes close to center get boosted first,
+            # farther shapes get boosted with a delay (encoded in _size_boost_timer)
+            amp = max(0.3, self._amplitude)
+            for s in self._shapes:
+                dx = s.x - cx
+                dy = s.y - cy
+                dist = math.sqrt(dx * dx + dy * dy)
+                # Delay = dist / wave_speed; wave takes ~0.5s to cross 32px
+                delay = dist / 64.0  # 0 at center, 0.5 at edge
+                boost = 1 if self._rng.random() < amp else 0
+                if boost and s.size < 3:
+                    s._size_boost = 1
+                    s._size_boost_timer = 0.2 + delay
+
+    def _behavior_error(self, dt: float) -> None:
+        """Shapes drift outward from center and desaturate."""
+        cx, cy = 32.0, 32.0
+        for s in self._shapes:
+            s.vx += (s.x - cx) * 0.005 * dt * 60.0
+            s.vy += (s.y - cy) * 0.005 * dt * 60.0
+            # Gentle speed cap
+            speed = math.sqrt(s.vx * s.vx + s.vy * s.vy)
+            if speed > 0.4:
+                s.vx = s.vx / speed * 0.4
+                s.vy = s.vy / speed * 0.4
+
+    def _behavior_happy(self, dt: float) -> None:
+        """Burst of shapes from center, then settle."""
+        if not self._happy_burst_done:
+            self._happy_burst_done = True
+            burst_count = self._rng.randint(15, 20)
+            cx, cy = 32.0, 32.0
+            bright_palette = [PALETTE[0], PALETTE[1], PALETTE[2]]  # red, orange, white
+            weights = [0.10, 0.25, 0.40, 0.25]
+            for _ in range(burst_count):
+                angle = self._rng.uniform(0.0, math.tau)
+                speed = self._rng.uniform(1.0, 3.0)
+                s = self._spawn_shape(
+                    weights, bright_palette,
+                    x=cx + self._rng.uniform(-2, 2),
+                    y=cy + self._rng.uniform(-2, 2),
+                    vx=math.cos(angle) * speed,
+                    vy=math.sin(angle) * speed,
+                    lifetime=self._rng.uniform(4.0, 8.0),
                 )
+                self._shapes.append(s)
 
-    def _draw_rect_wrap(
-        self,
-        draw: ImageDraw.ImageDraw,
-        x: float,
-        y: int,
-        w: int,
-        h: int,
-        color: tuple[int, int, int],
-    ) -> None:
-        """Draw a rectangle that wraps horizontally around the canvas."""
-        ix = int(round(x)) % self.width
-        x1 = ix
-        x2 = ix + w - 1
-        y2 = min(y + h - 1, self.height - 1)
+        # Gentle deceleration after burst
+        for s in self._shapes:
+            s.vx *= (1.0 - 0.3 * dt)
+            s.vy *= (1.0 - 0.3 * dt)
 
-        if y > y2:
-            return
+    def _behavior_sleeping(self, dt: float) -> None:
+        """Very slow, sparse, occasional firefly flash."""
+        # Nearly stop all motion
+        for s in self._shapes:
+            s.vx *= (1.0 - 2.0 * dt)
+            s.vy *= (1.0 - 2.0 * dt)
 
-        if x2 < self.width:
-            # Fits without wrapping
-            draw.rectangle([x1, y, x2, y2], fill=color)
-        else:
-            # Wraps around — draw two pieces
-            draw.rectangle([x1, y, self.width - 1, y2], fill=color)
-            draw.rectangle([0, y, x2 - self.width, y2], fill=color)
+        # Firefly effect — one shape brightens to white briefly
+        self._sleeping_firefly_timer -= dt
+        if self._sleeping_firefly_timer <= 0:
+            self._sleeping_firefly_timer = self._rng.uniform(3.0, 6.0)
+            if self._shapes:
+                self._sleeping_firefly_idx = self._rng.randint(
+                    0, len(self._shapes) - 1
+                )
+            else:
+                self._sleeping_firefly_idx = -1
+
+    # ------------------------------------------------------------------
+    # Population management
+    # ------------------------------------------------------------------
+
+    def _manage_population(self, dt: float, state: FaceState) -> None:
+        """Spawn or despawn shapes to match the target count for the current state."""
+        target = _STATE_TARGET_COUNT.get(state, 50)
+        alive = [s for s in self._shapes if not s._fading_out]
+        count = len(alive)
+
+        if count < target:
+            # Spawn new shapes to fill gap (up to 3 per frame to avoid bursts)
+            palette = SLEEPING_PALETTE if state == FaceState.SLEEPING else PALETTE
+            weights = _STATE_SIZE_WEIGHTS.get(state, [0.20, 0.40, 0.30, 0.10])
+            to_spawn = min(target - count, 3)
+            for _ in range(to_spawn):
+                s = self._spawn_shape(weights, palette)
+                # For thinking, use faster velocities
+                if state == FaceState.THINKING:
+                    s.vx = self._rng.uniform(-0.8, 0.8)
+                    s.vy = self._rng.uniform(-0.8, 0.8)
+                    # Bias color toward red/orange
+                    if self._rng.random() < 0.6:
+                        s.color = self._rng.choice(PALETTE[:2])
+                elif state == FaceState.SLEEPING:
+                    s.vx = self._rng.uniform(-0.02, 0.02)
+                    s.vy = self._rng.uniform(-0.02, 0.02)
+                elif state == FaceState.LISTENING:
+                    # Bias toward white/light gray
+                    if self._rng.random() < 0.5:
+                        s.color = self._rng.choice(PALETTE[2:4])
+                elif state == FaceState.HAPPY:
+                    # Brighter colors
+                    if self._rng.random() < 0.5:
+                        s.color = self._rng.choice(PALETTE[:3])
+                self._shapes.append(s)
+        elif count > target:
+            # Mark oldest non-fading shapes for fadeout
+            surplus = count - target
+            alive_sorted = sorted(alive, key=lambda s: s.age, reverse=True)
+            for s in alive_sorted[:surplus]:
+                s._fading_out = True
+                s._fade_out_timer = 0.0
+
+    # ------------------------------------------------------------------
+    # Rendering
+    # ------------------------------------------------------------------
+
+    def _render(self) -> Image.Image:
+        """Draw all shapes to a bytearray buffer and return a PIL Image."""
+        bg = BACKGROUND
+        # Initialize buffer with background color
+        buf = bytearray(64 * 64 * 3)
+        for i in range(64 * 64):
+            offset = i * 3
+            buf[offset] = bg[0]
+            buf[offset + 1] = bg[1]
+            buf[offset + 2] = bg[2]
+
+        state = self._current_state
+
+        for idx, s in enumerate(self._shapes):
+            if s.opacity < 0.01:
+                continue
+
+            # Determine effective color
+            color = s.color
+            opacity = s.opacity
+
+            # State-specific color modifications
+            if state == FaceState.ERROR:
+                color = _desaturate(color, 0.5)
+            elif state == FaceState.SLEEPING:
+                # Firefly effect
+                if idx == self._sleeping_firefly_idx:
+                    # Pulse to white over 0.5s then fade back
+                    pulse_phase = self._sleeping_firefly_timer
+                    # Timer counts down, so just after reset it's large.
+                    # The firefly is the shape at this index; make it bright
+                    # for a brief window. We use the timer value to create a pulse:
+                    # timer goes from ~5 down to 0; firefly is "on" when timer is
+                    # in the last 0.5s before it resets... but timer resets at 0.
+                    # Instead, track it with a simple brightness boost based on age.
+                    time_since_chosen = self._sleeping_firefly_timer
+                    # Since timer counts down and we pick a new firefly when it hits 0,
+                    # the firefly should glow throughout its period. Use a sine pulse.
+                    glow = max(0.0, math.sin(self._time * 4.0))
+                    if glow > 0.5:
+                        color = (240, 240, 240)
+                        opacity = 1.0
+
+            # Blend with background
+            drawn = _blend_color(color, bg, opacity)
+
+            # Determine draw size (with boost for speaking)
+            draw_size = min(3, s.size + s._size_boost)
+
+            cx = int(s.x)
+            cy = int(s.y)
+
+            # Get pixel offsets for this size
+            if draw_size == 0:
+                # Dots: alternate between 1x1 and 2x2
+                if (cx + cy) % 2 == 0:
+                    pixels = _CROSS_DOT
+                else:
+                    pixels = _CROSS_DOT_2X2
+            else:
+                pixels = _CROSS_PATTERNS[draw_size]
+
+            # Draw pixels
+            r, g, b = drawn
+            for dx, dy in pixels:
+                px = cx + dx
+                py = cy + dy
+                # Clip to canvas
+                if 0 <= px < 64 and 0 <= py < 64:
+                    off = (py * 64 + px) * 3
+                    buf[off] = r
+                    buf[off + 1] = g
+                    buf[off + 2] = b
+
+        return Image.frombytes("RGB", (64, 64), bytes(buf))
