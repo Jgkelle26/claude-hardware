@@ -19,21 +19,32 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PALETTE: list[tuple[int, int, int]] = [
-    (220, 70, 40),     # warm red
-    (240, 140, 30),    # orange
+    (70, 200, 190),    # teal
+    (240, 155, 40),    # warm orange
     (240, 240, 240),   # white
     (170, 170, 175),   # light gray
     (110, 110, 115),   # medium gray
 ]
 
-BACKGROUND: tuple[int, int, int] = (38, 38, 43)  # charcoal
+BACKGROUND: tuple[int, int, int] = (22, 22, 28)  # deep charcoal
 
 SLEEPING_PALETTE: list[tuple[int, int, int]] = [
-    (60, 30, 25),      # dim red
-    (70, 55, 25),      # dim amber
-    (70, 70, 75),      # dim gray
-    (45, 45, 50),      # darker gray
+    (25, 55, 65),      # deep teal
+    (45, 50, 70),      # dark slate blue
+    (55, 60, 75),      # dim steel
+    (30, 35, 50),      # dark navy
 ]
+
+THINKING_PALETTE: list[tuple[int, int, int]] = [
+    (50, 160, 200),    # electric blue
+    (80, 120, 210),    # bright indigo
+    (120, 200, 220),   # light cyan
+    (200, 220, 240),   # ice white
+]
+
+# Cluster centers — shapes spawn around these focal points
+# to create dense blocks with negative space between them
+_NUM_CLUSTERS: int = 4
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -127,13 +138,13 @@ _CROSS_PATTERNS: list[list[tuple[int, int]]] = [
 # ---------------------------------------------------------------------------
 
 _STATE_TARGET_COUNT: dict[FaceState, int] = {
-    FaceState.IDLE: 50,
-    FaceState.LISTENING: 35,
-    FaceState.THINKING: 70,
-    FaceState.SPEAKING: 50,
-    FaceState.ERROR: 25,
-    FaceState.HAPPY: 70,
-    FaceState.SLEEPING: 15,
+    FaceState.IDLE: 65,
+    FaceState.LISTENING: 45,
+    FaceState.THINKING: 90,
+    FaceState.SPEAKING: 60,
+    FaceState.ERROR: 30,
+    FaceState.HAPPY: 80,
+    FaceState.SLEEPING: 20,
 }
 
 # Size distribution weights per state: [dot, tiny, small, medium]
@@ -210,9 +221,11 @@ class EtherealTheme(ThemeRenderer):
         self._rng: random.Random = random.Random(42)
         self._next_idle_swap: float = 0.0
         self._speaking_wave_timer: float = 0.0
-        self._happy_burst_done: bool = False
+        self._happy_emit_timer: float = 0.0
         self._sleeping_firefly_timer: float = 0.0
         self._sleeping_firefly_idx: int = -1
+        # Cluster focal points — regenerated on activate
+        self._clusters: list[tuple[float, float]] = []
 
     # ------------------------------------------------------------------
     # ThemeRenderer interface
@@ -229,16 +242,22 @@ class EtherealTheme(ThemeRenderer):
             self._on_state_change(prev, state)
 
     def on_activate(self) -> None:
-        """Spawn 50-60 initial shapes randomly across the canvas."""
+        """Spawn initial shapes clustered around focal points."""
         self._shapes = []
         self._time = 0.0
-        self._next_idle_swap = self._rng.uniform(2.0, 4.0)
+        self._next_idle_swap = self._rng.uniform(1.0, 2.5)
         self._speaking_wave_timer = 0.0
-        self._happy_burst_done = False
+        self._happy_emit_timer = 0.0
         self._sleeping_firefly_timer = 0.0
         self._sleeping_firefly_idx = -1
 
-        count = self._rng.randint(50, 60)
+        # Generate cluster centers — spread across the canvas
+        self._clusters = [
+            (self._rng.uniform(8, 56), self._rng.uniform(8, 56))
+            for _ in range(_NUM_CLUSTERS)
+        ]
+
+        count = self._rng.randint(55, 70)
         weights = _STATE_SIZE_WEIGHTS[FaceState.IDLE]
         for _ in range(count):
             self._shapes.append(self._spawn_shape(weights, PALETTE))
@@ -269,7 +288,13 @@ class EtherealTheme(ThemeRenderer):
     def _on_state_change(self, prev: FaceState, new: FaceState) -> None:
         """React to state transitions."""
         if new == FaceState.HAPPY:
-            self._happy_burst_done = False
+            self._happy_emit_timer = 0.0
+        if new == FaceState.THINKING:
+            # Regenerate cluster centers for a fresh arrangement
+            self._clusters = [
+                (self._rng.uniform(10, 54), self._rng.uniform(10, 54))
+                for _ in range(_NUM_CLUSTERS)
+            ]
         if new == FaceState.SLEEPING:
             self._sleeping_firefly_timer = self._rng.uniform(2.0, 5.0)
             self._sleeping_firefly_idx = -1
@@ -287,20 +312,28 @@ class EtherealTheme(ThemeRenderer):
         vx: float | None = None,
         vy: float | None = None,
         lifetime: float = -1.0,
+        clustered: bool = True,
     ) -> Shape:
-        """Create a new shape with randomized properties."""
-        if x is None:
+        """Create a new shape. By default, places near a random cluster center."""
+        if x is None and clustered and self._clusters:
+            # Pick a random cluster center, gaussian scatter around it
+            cx, cy = self._rng.choice(self._clusters)
+            x = cx + self._rng.gauss(0, 8)
+            y = cy + self._rng.gauss(0, 8)
+            x = x % 64.0
+            y = y % 64.0
+        elif x is None:
             x = self._rng.uniform(0.0, 63.0)
         if y is None:
             y = self._rng.uniform(0.0, 63.0)
         if vx is None:
-            vx = self._rng.uniform(-0.3, 0.3)
+            vx = self._rng.uniform(-0.6, 0.6)
         if vy is None:
-            vy = self._rng.uniform(-0.3, 0.3)
+            vy = self._rng.uniform(-0.6, 0.6)
         size = _weighted_choice(self._rng, size_weights)
         color = palette[self._rng.randint(0, len(palette) - 1)]
         if lifetime < 0:
-            lifetime = self._rng.uniform(8.0, 25.0)
+            lifetime = self._rng.uniform(5.0, 15.0)
         return Shape(
             x=x, y=y, vx=vx, vy=vy,
             size=size, color=color,
@@ -318,19 +351,19 @@ class EtherealTheme(ThemeRenderer):
         for i, s in enumerate(self._shapes):
             s.age += dt
 
-            # Fade in (first 0.3s)
-            if s.age < 0.3 and not s._fading_out:
-                s.opacity = min(1.0, s.age / 0.3)
+            # Fade in (first 0.15s — snappy)
+            if s.age < 0.15 and not s._fading_out:
+                s.opacity = min(1.0, s.age / 0.15)
 
             # Check lifetime — begin fade out
             if s.lifetime > 0 and s.age >= s.lifetime and not s._fading_out:
                 s._fading_out = True
                 s._fade_out_timer = 0.0
 
-            # Fade out over 0.5s
+            # Fade out over 0.25s — smooth but quick
             if s._fading_out:
                 s._fade_out_timer += dt
-                s.opacity = max(0.0, 1.0 - s._fade_out_timer / 0.5)
+                s.opacity = max(0.0, 1.0 - s._fade_out_timer / 0.25)
                 if s.opacity <= 0.0:
                     to_remove.append(i)
                     continue
@@ -376,16 +409,16 @@ class EtherealTheme(ThemeRenderer):
 
     def _behavior_idle(self, dt: float) -> None:
         """Gentle breathing and occasional shape swap."""
-        # Breathing: opacity oscillates 0.85 - 1.0
-        breath = 0.85 + 0.15 * (math.sin(self._time * 1.2) + 1.0) / 2.0
+        # Breathing: opacity oscillates 0.90 - 1.0 (no dimming, subtle)
+        breath = 0.90 + 0.10 * (math.sin(self._time * 1.5) + 1.0) / 2.0
         for s in self._shapes:
-            if not s._fading_out and s.age >= 0.3:
+            if not s._fading_out and s.age >= 0.15:
                 s.opacity = breath
 
-        # Occasional swap: fade one out, spawn one elsewhere
+        # Frequent swap: fade one out, spawn one elsewhere (faster turnover)
         self._next_idle_swap -= dt
         if self._next_idle_swap <= 0:
-            self._next_idle_swap = self._rng.uniform(2.0, 4.0)
+            self._next_idle_swap = self._rng.uniform(1.0, 2.0)
             # Mark a random non-fading shape for death
             candidates = [s for s in self._shapes if not s._fading_out]
             if candidates:
@@ -405,24 +438,38 @@ class EtherealTheme(ThemeRenderer):
             s.vy *= (1.0 - 0.5 * dt)
 
     def _behavior_thinking(self, dt: float) -> None:
-        """Orbital motion around center, faster drift, red/orange bias."""
+        """Dramatic orbital sweep — shapes flow in streams around center.
+
+        Uses the THINKING_PALETTE (electric blues) and faster orbital
+        motion with expanding/contracting radius pulses.
+        """
         cx, cy = 32.0, 32.0
+        # Breathing radius — expands and contracts
+        radius_pulse = 1.0 + 0.3 * math.sin(self._time * 0.8)
         for s in self._shapes:
             dx = s.x - cx
             dy = s.y - cy
             dist = math.sqrt(dx * dx + dy * dy) + 0.01
-            # Tangential force (perpendicular to radial vector)
+            # Tangential force — fast orbital sweep
             tx = -dy / dist
             ty = dx / dist
-            force = 0.15
+            force = 0.35 * radius_pulse
             s.vx += tx * force * dt * 60.0
             s.vy += ty * force * dt * 60.0
-            # Speed cap
+            # Radial breathing — push out or pull in with the pulse
+            radial_force = (radius_pulse - 1.0) * 0.15
+            s.vx += (dx / dist) * radial_force * dt * 60.0
+            s.vy += (dy / dist) * radial_force * dt * 60.0
+            # Speed cap — allow faster motion
             speed = math.sqrt(s.vx * s.vx + s.vy * s.vy)
-            max_speed = 0.8
+            max_speed = 2.0
             if speed > max_speed:
                 s.vx = s.vx / speed * max_speed
                 s.vy = s.vy / speed * max_speed
+            # Fade opacity with distance — shapes near center are brighter
+            if not s._fading_out:
+                dist_factor = _clamp(1.0 - dist / 40.0, 0.3, 1.0)
+                s.opacity = dist_factor
 
     def _behavior_speaking(self, dt: float) -> None:
         """Pulsing wave radiating from center every ~1s."""
@@ -460,30 +507,34 @@ class EtherealTheme(ThemeRenderer):
                 s.vy = s.vy / speed * 0.4
 
     def _behavior_happy(self, dt: float) -> None:
-        """Burst of shapes from center, then settle."""
-        if not self._happy_burst_done:
-            self._happy_burst_done = True
-            burst_count = self._rng.randint(15, 20)
-            cx, cy = 32.0, 32.0
-            bright_palette = [PALETTE[0], PALETTE[1], PALETTE[2]]  # red, orange, white
-            weights = [0.10, 0.25, 0.40, 0.25]
-            for _ in range(burst_count):
-                angle = self._rng.uniform(0.0, math.tau)
-                speed = self._rng.uniform(1.0, 3.0)
+        """Fireworks — continuous emission from bottom, shapes arc upward."""
+        self._happy_emit_timer += dt
+        # Emit a batch from the bottom every 0.15s
+        if self._happy_emit_timer >= 0.15:
+            self._happy_emit_timer -= 0.15
+            bright_palette = [PALETTE[0], PALETTE[1], PALETTE[2]]  # teal, orange, white
+            weights = [0.15, 0.30, 0.35, 0.20]
+            emit_count = self._rng.randint(3, 6)
+            for _ in range(emit_count):
+                # Spawn from bottom edge, random x
+                spawn_x = self._rng.uniform(8.0, 56.0)
+                angle = self._rng.uniform(-0.8, 0.8)  # fan upward, slight spread
+                speed = self._rng.uniform(3.0, 6.0)
                 s = self._spawn_shape(
                     weights, bright_palette,
-                    x=cx + self._rng.uniform(-2, 2),
-                    y=cy + self._rng.uniform(-2, 2),
-                    vx=math.cos(angle) * speed,
-                    vy=math.sin(angle) * speed,
-                    lifetime=self._rng.uniform(4.0, 8.0),
+                    x=spawn_x,
+                    y=62.0 + self._rng.uniform(0, 2),
+                    vx=math.sin(angle) * speed * 0.5,
+                    vy=-speed,  # upward
+                    lifetime=self._rng.uniform(2.0, 4.0),
+                    clustered=False,
                 )
                 self._shapes.append(s)
 
-        # Gentle deceleration after burst
+        # Apply gravity — shapes arc and slow down as they rise
         for s in self._shapes:
-            s.vx *= (1.0 - 0.3 * dt)
-            s.vy *= (1.0 - 0.3 * dt)
+            s.vy += 1.5 * dt  # gentle gravity pulls back down
+            s.vx *= (1.0 - 0.5 * dt)  # horizontal drag
 
     def _behavior_sleeping(self, dt: float) -> None:
         """Very slow, sparse, occasional firefly flash."""
@@ -514,19 +565,21 @@ class EtherealTheme(ThemeRenderer):
         count = len(alive)
 
         if count < target:
-            # Spawn new shapes to fill gap (up to 3 per frame to avoid bursts)
-            palette = SLEEPING_PALETTE if state == FaceState.SLEEPING else PALETTE
+            # Spawn new shapes to fill gap (up to 5 per frame — faster turnover)
+            if state == FaceState.SLEEPING:
+                palette = SLEEPING_PALETTE
+            elif state == FaceState.THINKING:
+                palette = THINKING_PALETTE
+            else:
+                palette = PALETTE
             weights = _STATE_SIZE_WEIGHTS.get(state, [0.20, 0.40, 0.30, 0.10])
-            to_spawn = min(target - count, 3)
+            to_spawn = min(target - count, 5)
             for _ in range(to_spawn):
                 s = self._spawn_shape(weights, palette)
                 # For thinking, use faster velocities
                 if state == FaceState.THINKING:
-                    s.vx = self._rng.uniform(-0.8, 0.8)
-                    s.vy = self._rng.uniform(-0.8, 0.8)
-                    # Bias color toward red/orange
-                    if self._rng.random() < 0.6:
-                        s.color = self._rng.choice(PALETTE[:2])
+                    s.vx = self._rng.uniform(-1.2, 1.2)
+                    s.vy = self._rng.uniform(-1.2, 1.2)
                 elif state == FaceState.SLEEPING:
                     s.vx = self._rng.uniform(-0.02, 0.02)
                     s.vy = self._rng.uniform(-0.02, 0.02)
