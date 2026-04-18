@@ -20,15 +20,36 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 STRIPE_COLORS: list[tuple[int, int, int]] = [
-    (255, 0, 0),       # red
-    (255, 165, 0),     # orange
-    (255, 220, 0),     # yellow
-    (0, 180, 0),       # green
-    (0, 100, 255),     # blue
-    (100, 0, 200),     # purple
-    (220, 0, 120),     # magenta
-    (0, 0, 0),         # black
-    (255, 255, 255),   # white
+    (180, 70, 70),     # dusty rose
+    (200, 135, 75),    # warm sand
+    (190, 180, 90),    # muted gold
+    (80, 150, 110),    # sage green
+    (70, 120, 180),    # slate blue
+    (110, 75, 160),    # soft purple
+    (160, 75, 120),    # muted mauve
+    (35, 35, 50),      # dark slate
+    (210, 210, 220),   # soft white
+]
+
+# Darker palette for sleeping state — deep twilight tones
+SLEEPING_COLORS: list[tuple[int, int, int]] = [
+    (25, 20, 50),      # deep indigo
+    (40, 30, 70),      # dark purple
+    (20, 35, 65),      # midnight blue
+    (50, 25, 55),      # dark plum
+    (15, 30, 55),      # navy
+    (35, 40, 75),      # twilight blue
+    (45, 20, 45),      # dark berry
+    (10, 15, 35),      # near black blue
+    (55, 50, 80),      # dim lavender
+]
+
+# Thinking palette — restricted to 3-4 similar tones
+THINKING_COLORS: list[tuple[int, int, int]] = [
+    (70, 100, 165),    # medium blue
+    (85, 115, 180),    # lighter blue
+    (55, 80, 145),     # deeper blue
+    (95, 130, 190),    # soft blue
 ]
 
 # ---------------------------------------------------------------------------
@@ -77,9 +98,9 @@ class _StateParams:
 
 _STATE_PARAMS: dict[FaceState, _StateParams] = {
     FaceState.IDLE: _StateParams(
-        frag_min=0.0, frag_max=0.3,
-        drift_min=0.5, drift_max=2.0,
-        frag_osc_speed=0.4,
+        frag_min=0.0, frag_max=0.15,
+        drift_min=0.3, drift_max=1.2,
+        frag_osc_speed=0.3,
         brightness=1.0,
         jitter=0.0,
     ),
@@ -87,42 +108,42 @@ _STATE_PARAMS: dict[FaceState, _StateParams] = {
         frag_min=0.0, frag_max=0.0,
         drift_min=0.0, drift_max=0.0,
         frag_osc_speed=0.0,
-        brightness=1.15,
+        brightness=1.1,
         jitter=0.0,
     ),
     FaceState.THINKING: _StateParams(
-        frag_min=0.6, frag_max=0.9,
-        drift_min=3.0, drift_max=5.0,
-        frag_osc_speed=1.5,
-        brightness=1.0,
-        jitter=3.0,
-    ),
-    FaceState.SPEAKING: _StateParams(
-        frag_min=0.0, frag_max=0.5,
-        drift_min=0.5, drift_max=1.5,
-        frag_osc_speed=6.28,  # full 0→0.5→0 cycle in ~1 second
+        frag_min=0.2, frag_max=0.45,
+        drift_min=1.5, drift_max=3.0,
+        frag_osc_speed=0.8,
         brightness=1.0,
         jitter=1.0,
     ),
-    FaceState.ERROR: _StateParams(
-        frag_min=0.7, frag_max=1.0,
-        drift_min=0.0, drift_max=0.5,
-        frag_osc_speed=2.0,
+    FaceState.SPEAKING: _StateParams(
+        frag_min=0.0, frag_max=0.3,
+        drift_min=0.4, drift_max=1.0,
+        frag_osc_speed=4.0,
         brightness=1.0,
-        jitter=4.0,
+        jitter=0.5,
+    ),
+    FaceState.ERROR: _StateParams(
+        frag_min=0.1, frag_max=0.25,
+        drift_min=0.1, drift_max=0.3,
+        frag_osc_speed=0.5,
+        brightness=0.85,
+        jitter=0.5,
     ),
     FaceState.HAPPY: _StateParams(
-        frag_min=0.1, frag_max=0.1,
-        drift_min=1.0, drift_max=2.0,
+        frag_min=0.05, frag_max=0.1,
+        drift_min=0.8, drift_max=1.5,
         frag_osc_speed=0.0,
         brightness=1.0,
         jitter=0.0,
     ),
     FaceState.SLEEPING: _StateParams(
         frag_min=0.0, frag_max=0.0,
-        drift_min=0.05, drift_max=0.15,
+        drift_min=0.05, drift_max=0.1,
         frag_osc_speed=0.0,
-        brightness=0.2,
+        brightness=1.0,  # no dimming — dark colors handle this
         jitter=0.0,
     ),
 }
@@ -378,25 +399,35 @@ class EtherealTheme(ThemeRenderer):
         for i, col in enumerate(self._columns):
             color = col.color
 
-            # HAPPY: rainbow hue shift
-            if self._current_state == FaceState.HAPPY:
+            # SLEEPING: use dark twilight palette instead of dimming
+            if self._current_state == FaceState.SLEEPING:
+                color = SLEEPING_COLORS[i % len(SLEEPING_COLORS)]
+                # One column gently pulses slightly brighter
+                if i == self._sleeping_pulse_col:
+                    pulse = (math.sin(self._sleeping_pulse_timer * 1.0) + 1.0) / 2.0
+                    color = _apply_brightness(color, 1.0 + pulse * 0.6)
+
+            # THINKING: use restricted blue palette
+            elif self._current_state == FaceState.THINKING:
+                color = THINKING_COLORS[i % len(THINKING_COLORS)]
+
+            # HAPPY: gentle hue shift
+            elif self._current_state == FaceState.HAPPY:
                 color = _hue_shift(color, self._happy_hue_offset + i * 0.1)
 
-            # ERROR: flash between column color and red
-            if self._current_state == FaceState.ERROR:
-                cycle = int(self._error_flash_timer / 0.2) % 2
-                if cycle == 1:
-                    color = (255, 0, 0)
+            # ERROR: desaturate and warm — columns slowly lose color
+            elif self._current_state == FaceState.ERROR:
+                # Blend toward a muted warm tone
+                warm = (140, 95, 70)  # dusty amber
+                blend = 0.4 + 0.2 * math.sin(self._error_flash_timer * 1.5 + i)
+                color = (
+                    int(color[0] * (1 - blend) + warm[0] * blend),
+                    int(color[1] * (1 - blend) + warm[1] * blend),
+                    int(color[2] * (1 - blend) + warm[2] * blend),
+                )
 
             # Brightness adjustment
             color = _apply_brightness(color, params.brightness)
-
-            # SLEEPING: dim pulse on one column
-            if self._current_state == FaceState.SLEEPING:
-                if i == self._sleeping_pulse_col:
-                    pulse = (math.sin(self._sleeping_pulse_timer * 1.5) + 1.0) / 2.0
-                    pulse_brightness = 0.2 + pulse * 0.25
-                    color = _apply_brightness(col.color, pulse_brightness)
 
             # Draw the column (or its fragments)
             self._draw_column(draw, col, color)
