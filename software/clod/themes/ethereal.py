@@ -19,11 +19,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 PALETTE: list[tuple[int, int, int]] = [
-    (70, 200, 190),    # teal
-    (240, 155, 40),    # warm orange
-    (240, 240, 240),   # white
-    (170, 170, 175),   # light gray
-    (110, 110, 115),   # medium gray
+    (60, 220, 210),    # bright teal
+    (250, 160, 40),    # vivid orange
+    (255, 255, 255),   # pure white
+    (200, 200, 210),   # bright gray
+    (140, 230, 180),   # mint green
 ]
 
 BACKGROUND: tuple[int, int, int] = (22, 22, 28)  # deep charcoal
@@ -138,13 +138,13 @@ _CROSS_PATTERNS: list[list[tuple[int, int]]] = [
 # ---------------------------------------------------------------------------
 
 _STATE_TARGET_COUNT: dict[FaceState, int] = {
-    FaceState.IDLE: 65,
-    FaceState.LISTENING: 45,
-    FaceState.THINKING: 120,
-    FaceState.SPEAKING: 60,
-    FaceState.ERROR: 30,
-    FaceState.HAPPY: 80,
-    FaceState.SLEEPING: 20,
+    FaceState.IDLE: 100,
+    FaceState.LISTENING: 70,
+    FaceState.THINKING: 150,
+    FaceState.SPEAKING: 90,
+    FaceState.ERROR: 45,
+    FaceState.HAPPY: 110,
+    FaceState.SLEEPING: 30,
 }
 
 # Size distribution weights per state: [dot, tiny, small, medium]
@@ -327,13 +327,13 @@ class EtherealTheme(ThemeRenderer):
         if y is None:
             y = self._rng.uniform(0.0, 63.0)
         if vx is None:
-            vx = self._rng.uniform(-0.6, 0.6)
+            vx = self._rng.uniform(-1.5, 1.5)
         if vy is None:
-            vy = self._rng.uniform(-0.6, 0.6)
+            vy = self._rng.uniform(-1.5, 1.5)
         size = _weighted_choice(self._rng, size_weights)
         color = palette[self._rng.randint(0, len(palette) - 1)]
         if lifetime < 0:
-            lifetime = self._rng.uniform(5.0, 15.0)
+            lifetime = self._rng.uniform(2.0, 6.0)
         return Shape(
             x=x, y=y, vx=vx, vy=vy,
             size=size, color=color,
@@ -351,9 +351,9 @@ class EtherealTheme(ThemeRenderer):
         for i, s in enumerate(self._shapes):
             s.age += dt
 
-            # Fade in (first 0.15s — snappy)
-            if s.age < 0.15 and not s._fading_out:
-                s.opacity = min(1.0, s.age / 0.15)
+            # Snap to full opacity immediately — no fade-in dimming
+            if not s._fading_out and s.opacity < 1.0:
+                s.opacity = 1.0
 
             # Check lifetime — begin fade out
             if s.lifetime > 0 and s.age >= s.lifetime and not s._fading_out:
@@ -408,17 +408,16 @@ class EtherealTheme(ThemeRenderer):
             self._behavior_sleeping(dt)
 
     def _behavior_idle(self, dt: float) -> None:
-        """Gentle breathing and occasional shape swap."""
-        # Breathing: opacity oscillates 0.90 - 1.0 (no dimming, subtle)
-        breath = 0.90 + 0.10 * (math.sin(self._time * 1.5) + 1.0) / 2.0
+        """Shapes at full brightness, frequent turnover for activity."""
+        # No breathing/opacity modulation — shapes stay at full brightness
         for s in self._shapes:
-            if not s._fading_out and s.age >= 0.15:
-                s.opacity = breath
+            if not s._fading_out:
+                s.opacity = 1.0
 
-        # Frequent swap: fade one out, spawn one elsewhere (faster turnover)
+        # Fast turnover — shapes constantly cycling
         self._next_idle_swap -= dt
         if self._next_idle_swap <= 0:
-            self._next_idle_swap = self._rng.uniform(1.0, 2.0)
+            self._next_idle_swap = self._rng.uniform(0.5, 1.2)
             # Mark a random non-fading shape for death
             candidates = [s for s in self._shapes if not s._fading_out]
             if candidates:
@@ -594,7 +593,7 @@ class EtherealTheme(ThemeRenderer):
             else:
                 palette = PALETTE
             weights = _STATE_SIZE_WEIGHTS.get(state, [0.20, 0.40, 0.30, 0.10])
-            to_spawn = min(target - count, 5)
+            to_spawn = min(target - count, 8)
             for _ in range(to_spawn):
                 s = self._spawn_shape(weights, palette)
                 # For thinking, use faster velocities
@@ -642,34 +641,23 @@ class EtherealTheme(ThemeRenderer):
             if s.opacity < 0.01:
                 continue
 
-            # Determine effective color
+            # Determine effective color — full brightness, no blending for live shapes
             color = s.color
-            opacity = s.opacity
 
             # State-specific color modifications
             if state == FaceState.ERROR:
-                color = _desaturate(color, 0.5)
+                color = _desaturate(color, 0.4)
             elif state == FaceState.SLEEPING:
-                # Firefly effect
                 if idx == self._sleeping_firefly_idx:
-                    # Pulse to white over 0.5s then fade back
-                    pulse_phase = self._sleeping_firefly_timer
-                    # Timer counts down, so just after reset it's large.
-                    # The firefly is the shape at this index; make it bright
-                    # for a brief window. We use the timer value to create a pulse:
-                    # timer goes from ~5 down to 0; firefly is "on" when timer is
-                    # in the last 0.5s before it resets... but timer resets at 0.
-                    # Instead, track it with a simple brightness boost based on age.
-                    time_since_chosen = self._sleeping_firefly_timer
-                    # Since timer counts down and we pick a new firefly when it hits 0,
-                    # the firefly should glow throughout its period. Use a sine pulse.
                     glow = max(0.0, math.sin(self._time * 4.0))
                     if glow > 0.5:
-                        color = (240, 240, 240)
-                        opacity = 1.0
+                        color = (255, 255, 255)
 
-            # Blend with background
-            drawn = _blend_color(color, bg, opacity)
+            # Only blend with background if actually fading out
+            if s._fading_out and s.opacity < 1.0:
+                drawn = _blend_color(color, bg, s.opacity)
+            else:
+                drawn = color
 
             # Determine draw size (with boost for speaking)
             draw_size = min(3, s.size + s._size_boost)
