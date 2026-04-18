@@ -617,18 +617,10 @@ class CharacterTheme(ThemeRenderer):
         return 0.20
 
     def _get_brightness_multiplier(self, state: FaceState) -> float:
-        """Return overall brightness multiplier for the face map."""
-        if state == FaceState.LISTENING:
-            return 1.2
-        if state == FaceState.THINKING:
-            return 0.85
+        """Return overall brightness multiplier for the face map.
+
+        No dimming — all states use distinct palettes/colors instead.
+        """
         if state == FaceState.SPEAKING:
-            # Slight pulse with amplitude
-            return 1.0 + 0.15 * self._amplitude
-        if state == FaceState.ERROR:
-            return 1.0
-        if state == FaceState.HAPPY:
-            return 1.3
-        if state == FaceState.SLEEPING:
-            return 0.5
+            return 1.0 + 0.10 * self._amplitude
         return 1.0

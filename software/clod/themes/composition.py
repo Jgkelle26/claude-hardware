@@ -425,12 +425,20 @@ class CompositionTheme(ThemeRenderer):
             c2 = PALETTE[(offset + 3) % len(PALETTE)]
             _draw_checkerboard(draw, z.x, z.y, z.width, z.height, c1, c2, cell_size=4)
 
+    # Dark palette for sleeping — no dimming, just dark colors
+    _SLEEP_COLORS: list[tuple[int, int, int]] = [
+        (20, 25, 50),    # deep navy
+        (30, 35, 55),    # dark slate
+        (15, 20, 40),    # midnight
+        (25, 30, 60),    # dark blue
+        (35, 25, 45),    # dark plum
+    ]
+
     def _draw_sleeping(self, draw: ImageDraw.ImageDraw, dt: float) -> None:
-        """SLEEPING: very dim zones with occasional faint flicker."""
+        """SLEEPING: dark-palette zones with occasional faint flicker."""
         self._sleep_flicker_timer -= dt
         flicker_active = False
         if self._sleep_flicker_timer <= 0.0:
-            # Brief flicker window.
             if self._sleep_flicker_timer > -0.15:
                 flicker_active = True
             else:
@@ -438,12 +446,12 @@ class CompositionTheme(ThemeRenderer):
                 self._sleep_flicker_zone = random.randint(0, max(0, len(self._zones) - 1))
 
         for i, z in enumerate(self._zones):
+            c1 = self._SLEEP_COLORS[i % len(self._SLEEP_COLORS)]
+            c2 = self._SLEEP_COLORS[(i + 2) % len(self._SLEEP_COLORS)]
             if flicker_active and i == self._sleep_flicker_zone:
-                dim_factor = 0.35
-            else:
-                dim_factor = 0.12
-            c1 = _dim(z.color1, dim_factor)
-            c2 = _dim(z.color2, dim_factor)
+                # Slightly brighter variant for flicker
+                c1 = (c1[0] + 25, c1[1] + 25, c1[2] + 30)
+                c2 = (c2[0] + 25, c2[1] + 25, c2[2] + 30)
             self._draw_one_zone(draw, z, c1_override=c1, c2_override=c2)
 
     # ------------------------------------------------------------------

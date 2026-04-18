@@ -140,7 +140,7 @@ _CROSS_PATTERNS: list[list[tuple[int, int]]] = [
 _STATE_TARGET_COUNT: dict[FaceState, int] = {
     FaceState.IDLE: 65,
     FaceState.LISTENING: 45,
-    FaceState.THINKING: 90,
+    FaceState.THINKING: 120,
     FaceState.SPEAKING: 60,
     FaceState.ERROR: 30,
     FaceState.HAPPY: 80,
@@ -438,38 +438,59 @@ class EtherealTheme(ThemeRenderer):
             s.vy *= (1.0 - 0.5 * dt)
 
     def _behavior_thinking(self, dt: float) -> None:
-        """Dramatic orbital sweep — shapes flow in streams around center.
+        """Processing — shapes converge into clusters then scatter and reform.
 
-        Uses the THINKING_PALETTE (electric blues) and faster orbital
-        motion with expanding/contracting radius pulses.
+        Uses THINKING_PALETTE (electric blues). Shapes pull toward the
+        nearest cluster center, creating dense blocks that assemble and
+        rearrange. Periodically the cluster targets shift, causing shapes
+        to break apart and reassemble elsewhere — like thoughts forming.
         """
-        cx, cy = 32.0, 32.0
-        # Breathing radius — expands and contracts
-        radius_pulse = 1.0 + 0.3 * math.sin(self._time * 0.8)
+        # Shift cluster targets every 2-3 seconds to create reassembly
+        if int(self._time * 0.4) != int((self._time - dt) * 0.4):
+            # Move one random cluster center to a new position
+            if self._clusters:
+                idx = self._rng.randint(0, len(self._clusters) - 1)
+                self._clusters[idx] = (
+                    self._rng.uniform(6, 58),
+                    self._rng.uniform(6, 58),
+                )
+
         for s in self._shapes:
-            dx = s.x - cx
-            dy = s.y - cy
+            # Find nearest cluster center
+            best_dist = 999.0
+            best_cx, best_cy = 32.0, 32.0
+            for ccx, ccy in self._clusters:
+                d = math.sqrt((s.x - ccx) ** 2 + (s.y - ccy) ** 2)
+                if d < best_dist:
+                    best_dist = d
+                    best_cx, best_cy = ccx, ccy
+
+            dx = best_cx - s.x
+            dy = best_cy - s.y
             dist = math.sqrt(dx * dx + dy * dy) + 0.01
-            # Tangential force — fast orbital sweep
+
+            # Strong pull toward nearest cluster — shapes assemble
+            pull_strength = 0.25
+            s.vx += (dx / dist) * pull_strength * dt * 60.0
+            s.vy += (dy / dist) * pull_strength * dt * 60.0
+
+            # Add slight tangential swirl for visual interest
             tx = -dy / dist
             ty = dx / dist
-            force = 0.35 * radius_pulse
-            s.vx += tx * force * dt * 60.0
-            s.vy += ty * force * dt * 60.0
-            # Radial breathing — push out or pull in with the pulse
-            radial_force = (radius_pulse - 1.0) * 0.15
-            s.vx += (dx / dist) * radial_force * dt * 60.0
-            s.vy += (dy / dist) * radial_force * dt * 60.0
-            # Speed cap — allow faster motion
+            s.vx += tx * 0.08 * dt * 60.0
+            s.vy += ty * 0.08 * dt * 60.0
+
+            # When very close to cluster center, jitter to avoid collapse
+            if dist < 5.0:
+                s.vx += self._rng.uniform(-0.5, 0.5) * dt * 60.0
+                s.vy += self._rng.uniform(-0.5, 0.5) * dt * 60.0
+
+            # Speed cap
             speed = math.sqrt(s.vx * s.vx + s.vy * s.vy)
-            max_speed = 2.0
+            max_speed = 2.5
             if speed > max_speed:
                 s.vx = s.vx / speed * max_speed
                 s.vy = s.vy / speed * max_speed
-            # Fade opacity with distance — shapes near center are brighter
-            if not s._fading_out:
-                dist_factor = _clamp(1.0 - dist / 40.0, 0.3, 1.0)
-                s.opacity = dist_factor
 
     def _behavior_speaking(self, dt: float) -> None:
         """Pulsing wave radiating from center every ~1s."""

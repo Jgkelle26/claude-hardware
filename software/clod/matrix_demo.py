@@ -22,7 +22,6 @@ from clod.themes import (
     CharacterTheme,
     CompositionTheme,
     EtherealTheme,
-    EyeTheme,
     ParticleCloudTheme,
     ThemeManager,
 )
@@ -91,7 +90,6 @@ def main() -> None:
     backend = MockMatrixBackend()
 
     manager = ThemeManager(bus, backend)
-    manager.add_theme(EyeTheme())
     manager.add_theme(CompositionTheme())
     manager.add_theme(EtherealTheme())
     manager.add_theme(ParticleCloudTheme())
