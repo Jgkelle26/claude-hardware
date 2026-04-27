@@ -22,7 +22,7 @@ from clod.themes.base import ThemeRenderer
 # Background
 # ---------------------------------------------------------------------------
 
-_BG_COLOR: tuple[int, int, int] = (40, 20, 80)
+_BG_COLOR: tuple[int, int, int] = (8, 10, 18)
 
 # ---------------------------------------------------------------------------
 # Palette
@@ -30,19 +30,52 @@ _BG_COLOR: tuple[int, int, int] = (40, 20, 80)
 
 
 def _generate_palette(n: int = 30) -> list[tuple[int, int, int]]:
-    """Full-spectrum palette plus dark accents for contrast."""
+    """Full-spectrum bright palette — no dark colors."""
     colors: list[tuple[int, int, int]] = []
     for i in range(n):
         hue = i / n
-        r, g, b = colorsys.hls_to_rgb(hue, 0.5, 0.9)
+        r, g, b = colorsys.hls_to_rgb(hue, 0.6, 1.0)
         colors.append((int(r * 255), int(g * 255), int(b * 255)))
-    # Dark / black particles for visual contrast
-    colors.extend([(0, 0, 0)] * 5)
-    colors.extend([(40, 40, 40)] * 3)
+    # Add some whites for brightness
+    colors.extend([(255, 255, 255)] * 5)
     return colors
 
 
 _PALETTE: list[tuple[int, int, int]] = _generate_palette()
+
+# Per-state color overrides — applied each frame
+_STATE_PALETTES: dict[FaceState, list[tuple[int, int, int]]] = {
+    FaceState.IDLE: [
+        (120, 50, 200), (160, 80, 255), (90, 30, 170),
+        (255, 255, 255), (200, 200, 220),
+        (0, 0, 0), (10, 5, 20),
+    ],  # purple, white, black
+    FaceState.LISTENING: [
+        (180, 120, 60), (140, 90, 45), (200, 160, 90),
+        (160, 100, 50), (120, 80, 40), (220, 180, 120),
+        (100, 70, 35),
+    ],  # earth tones — warm browns, tans, clay
+    FaceState.THINKING: [
+        (80, 60, 255), (120, 80, 255), (60, 40, 200),
+        (150, 100, 255), (40, 30, 180),
+    ],  # deep purples and indigos
+    FaceState.SPEAKING: [
+        (255, 200, 50), (255, 150, 30), (255, 100, 20),
+        (255, 240, 100), (255, 80, 10),
+    ],  # fiery oranges and yellows
+    FaceState.ERROR: [
+        (255, 30, 30), (255, 60, 60), (200, 0, 0),
+        (255, 100, 80), (180, 20, 20),
+    ],  # reds
+    FaceState.HAPPY: [
+        (255, 50, 200), (50, 255, 150), (255, 255, 50),
+        (50, 200, 255), (255, 100, 50), (200, 50, 255),
+    ],  # rainbow party
+    FaceState.SLEEPING: [
+        (30, 30, 50), (40, 40, 70), (50, 50, 80),
+        (35, 35, 60),
+    ],  # dark blues
+}
 
 # ---------------------------------------------------------------------------
 # Particle dataclass
@@ -93,7 +126,7 @@ class ParticleCloudTheme(ThemeRenderer):
 
     def on_activate(self) -> None:
         """Spawn the particle field."""
-        self._particles = self._spawn_particles(count=200)
+        self._particles = self._spawn_particles(count=300)
         self._time = 0.0
         self._breathing_phase = 0.0
         self._speak_timer = 0.0
@@ -134,9 +167,12 @@ class ParticleCloudTheme(ThemeRenderer):
         pixels = img.load()
         assert pixels is not None
 
+        state_palette = _STATE_PALETTES.get(self._current_state, _PALETTE)
+
         for p in self._particles:
-            color = p.color
-            # HAPPY: slowly rotate hue
+            # Recolor from state palette each frame for shimmer
+            color = random.choice(state_palette)
+            # HAPPY: also rotate hue for extra chaos
             if self._current_state == FaceState.HAPPY:
                 color = self._rotated_color(p)
             # SLEEPING firefly flash
@@ -152,15 +188,20 @@ class ParticleCloudTheme(ThemeRenderer):
                 color = (min(wr, 255), min(wg, 255), min(wb, 255))
 
             ix, iy = int(p.x), int(p.y)
-            if p.size == 1:
+            # Breathe: some particles pulse to 2px based on a wave
+            pulse = math.sin(self._time * 3.0 + p.home_x * 0.5) > 0.5
+            draw_size = 2 if pulse else 1
+
+            if draw_size == 1:
                 if 0 <= ix < self.width and 0 <= iy < self.height:
                     pixels[ix, iy] = color
             else:
-                for ox in range(p.size):
-                    for oy in range(p.size):
-                        px, py = ix + ox, iy + oy
-                        if 0 <= px < self.width and 0 <= py < self.height:
-                            pixels[px, py] = color
+                # 2px: draw center + one neighbor (not a full block — stays tiny)
+                if 0 <= ix < self.width and 0 <= iy < self.height:
+                    pixels[ix, iy] = color
+                nx, ny = ix + 1, iy
+                if 0 <= nx < self.width and 0 <= ny < self.height:
+                    pixels[nx, ny] = color
 
         return img
 
@@ -180,7 +221,10 @@ class ParticleCloudTheme(ThemeRenderer):
             self._firefly_timer += dt
             if self._firefly_timer > 2.0:
                 self._firefly_timer = 0.0
-                self._firefly_index = random.randint(0, len(self._particles) - 1)
+                if self._particles:
+                    self._firefly_index = random.randint(0, len(self._particles) - 1)
+                else:
+                    self._firefly_index = -1
         if state == FaceState.HAPPY:
             for p in self._particles:
                 p.hue_offset += dt * 0.1  # slow rotation
@@ -207,20 +251,20 @@ class ParticleCloudTheme(ThemeRenderer):
             p.vx += fx * dt
             p.vy += fy * dt
 
-            # 3. Drag
-            drag = 0.98
+            # 3. Drag — light so swarm stays fast
+            drag = 0.99
             if state == FaceState.SLEEPING:
-                drag = 0.95  # heavier drag for calm sleep
+                drag = 0.92
             p.vx *= drag
             p.vy *= drag
 
             # 4. Soft bounce at edges
             self._bounce(p)
 
-            # 5. Jitter (tiny for sleeping)
-            jitter_scale = 0.3
+            # 5. Jitter — swarming energy
+            jitter_scale = 2.0
             if state == FaceState.SLEEPING:
-                jitter_scale = 0.03
+                jitter_scale = 0.1
             p.vx += random.gauss(0, jitter_scale)
             p.vy += random.gauss(0, jitter_scale)
 
@@ -241,9 +285,9 @@ class ParticleCloudTheme(ThemeRenderer):
         dist_center = math.sqrt(dx_center * dx_center + dy_center * dy_center) or 0.001
 
         if state == FaceState.IDLE:
-            # Gentle gravity toward home
-            fx = dx_home * 0.02
-            fy = dy_home * 0.02
+            # Gravity toward home — fast return
+            fx = dx_home * 0.15
+            fy = dy_home * 0.15
             # Breathing pulse: outward push every ~3 seconds
             breath = math.sin(self._breathing_phase * (2.0 * math.pi / 3.0))
             if breath > 0.7:
@@ -255,8 +299,8 @@ class ParticleCloudTheme(ThemeRenderer):
             return (fx, fy)
 
         if state == FaceState.LISTENING:
-            fx = dx_center * 0.05
-            fy = dy_center * 0.05
+            fx = dx_center * 0.25
+            fy = dy_center * 0.25
             # Amplitude pushes outward
             if self._amplitude > 0.01 and dist_center > 0.5:
                 nx = -dx_center / dist_center
@@ -267,37 +311,41 @@ class ParticleCloudTheme(ThemeRenderer):
             return (fx, fy)
 
         if state == FaceState.THINKING:
-            # Orbit: tangential force perpendicular to center vector
-            # Tangent direction (90 deg CCW): (-dy, dx)
-            tx = -dy_center / dist_center
-            ty = dx_center / dist_center
-            # Edge particles orbit faster
-            speed_factor = 0.5 + dist_center * 0.05
-            fx = tx * speed_factor
-            fy = ty * speed_factor
-            # Mild inward pull to keep swirl coherent
-            fx += dx_center * 0.01
-            fy += dy_center * 0.01
+            # Split into four tight clusters in corners
+            corners = [(10.0, 10.0), (54.0, 10.0), (10.0, 54.0), (54.0, 54.0)]
+            # Assign particle to a corner based on its home position quadrant
+            if p.home_x < 32:
+                best_cx = 10.0 if p.home_y < 32 else 10.0
+                best_cy = 10.0 if p.home_y < 32 else 54.0
+            else:
+                best_cx = 54.0 if p.home_y < 32 else 54.0
+                best_cy = 10.0 if p.home_y < 32 else 54.0
+            dx_corner = best_cx - p.x
+            dy_corner = best_cy - p.y
+            dist_corner = math.sqrt(dx_corner ** 2 + dy_corner ** 2) + 0.01
+            # Very strong pull — pack them tight
+            fx = dx_corner * 0.6
+            fy = dy_corner * 0.6
+            # Orbit within the cluster for swarming feel
+            tx = -dy_corner / dist_corner
+            ty = dx_corner / dist_corner
+            fx += tx * 2.0
+            fy += ty * 2.0
             return (fx, fy)
 
         if state == FaceState.SPEAKING:
-            # Rhythmic outward pulse every 0.5s
-            cycle = self._speak_timer % 0.5
-            if cycle < 0.1:
-                # Impulse outward
-                if dist_center > 0.5:
-                    nx = -dx_center / dist_center
-                    ny = -dy_center / dist_center
-                    return (nx * 3.0, ny * 3.0)
-            # Otherwise gentle pull back
-            return (dx_center * 0.02, dy_center * 0.02)
+            # Strong pull to center — swarm crammed into a tight ball
+            fx = dx_center * 0.5
+            fy = dy_center * 0.5
+            # Jitter keeps them buzzing even when packed tight
+            return (fx, fy)
 
         if state == FaceState.ERROR:
             # Strong outward flee
             if dist_center > 0.5:
                 nx = -dx_center / dist_center
                 ny = -dy_center / dist_center
-                return (nx * 5.0, ny * 5.0)
+                return (nx * 12.0, ny * 12.0)
             return (0.0, 0.0)
 
         if state == FaceState.HAPPY:
@@ -308,8 +356,8 @@ class ParticleCloudTheme(ThemeRenderer):
                     ddx = pp.x - cx
                     ddy = pp.y - cy
                     dd = math.sqrt(ddx * ddx + ddy * ddy) or 0.001
-                    pp.vx += (ddx / dd) * 8.0
-                    pp.vy += (ddy / dd) * 8.0
+                    pp.vx += (ddx / dd) * 15.0
+                    pp.vy += (ddy / dd) * 15.0
             # Gentle drift back + swirl
             tx = -dy_center / dist_center
             ty = dx_center / dist_center
@@ -318,9 +366,13 @@ class ParticleCloudTheme(ThemeRenderer):
             return (fx, fy)
 
         if state == FaceState.SLEEPING:
-            # Very strong pull toward home
-            fx = dx_home * 0.08
-            fy = dy_home * 0.08
+            # Pull to bottom of screen — gravity + slight spread along x
+            target_y = 58.0
+            target_x = p.home_x  # spread along original x positions
+            dx_t = target_x - p.x
+            dy_t = target_y - p.y
+            fx = dx_t * 0.05
+            fy = dy_t * 0.15  # stronger downward pull
             return (fx, fy)
 
         # Fallback: drift toward home
@@ -361,7 +413,7 @@ class ParticleCloudTheme(ThemeRenderer):
     def _spawn_particles(self, count: int = 200) -> list[Particle]:
         """Create the initial particle field with Gaussian distribution."""
         cx, cy = self.width / 2.0, self.height / 2.0
-        sigma = 12.0
+        sigma = 20.0
         particles: list[Particle] = []
         for _ in range(count):
             x = random.gauss(cx, sigma)
@@ -369,10 +421,11 @@ class ParticleCloudTheme(ThemeRenderer):
             # Clamp to canvas
             x = max(0.0, min(float(self.width - 1), x))
             y = max(0.0, min(float(self.height - 1), y))
-            vx = random.uniform(-0.5, 0.5)
-            vy = random.uniform(-0.5, 0.5)
+            vx = random.uniform(-5.0, 5.0)
+            vy = random.uniform(-5.0, 5.0)
             color = random.choice(_PALETTE)
-            size = 2 if random.random() < 0.2 else 1
+            # All single pixel
+            size = 1
             p = Particle(
                 x=x,
                 y=y,

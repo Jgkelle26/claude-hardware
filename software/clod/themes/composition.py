@@ -34,6 +34,13 @@ PALETTE: List[Tuple[int, int, int]] = [
 
 BACKGROUND: Tuple[int, int, int] = (245, 230, 208)  # cream
 
+# Restricted 3-color palette for idle and speaking
+IDLE_COLORS: List[Tuple[int, int, int]] = [
+    (0, 85, 255),      # blue
+    (255, 255, 255),   # white
+    (0, 0, 0),         # black
+]
+
 
 # ---------------------------------------------------------------------------
 # Pattern enumeration
@@ -68,7 +75,7 @@ class Zone:
     color2: Tuple[int, int, int]
     phase: float = 0.0
     # Morph timer -- counts time until the next IDLE morph for this zone.
-    morph_timer: float = field(default_factory=lambda: random.uniform(2.0, 3.0))
+    morph_timer: float = field(default_factory=lambda: random.uniform(6.0, 12.0))
 
 
 # ---------------------------------------------------------------------------
@@ -321,7 +328,10 @@ class CompositionTheme(ThemeRenderer):
 
         if state == FaceState.IDLE:
             self._update_idle(dt)
-            self._draw_zones(draw, self._zones)
+            for z in self._zones:
+                c1 = IDLE_COLORS[hash((z.x, z.y)) % len(IDLE_COLORS)]
+                c2 = IDLE_COLORS[(hash((z.x, z.y)) + 1) % len(IDLE_COLORS)]
+                self._draw_one_zone(draw, z, c1_override=c1, c2_override=c2)
 
         elif state == FaceState.LISTENING:
             self._draw_listening(draw, dt)
@@ -352,86 +362,96 @@ class CompositionTheme(ThemeRenderer):
     # ------------------------------------------------------------------
 
     def _update_idle(self, dt: float) -> None:
-        """In IDLE, occasionally morph one random zone."""
+        """In IDLE, very occasionally swap colors on one zone. No pattern changes."""
         for z in self._zones:
             z.morph_timer -= dt
             if z.morph_timer <= 0.0:
-                # Morph this zone: change pattern and/or swap colors.
-                if random.random() < 0.5:
-                    z.pattern = random.choice(ALL_PATTERNS)
-                else:
-                    z.color1, z.color2 = z.color2, z.color1
-                z.morph_timer = random.uniform(2.0, 3.0)
+                # Just swap colors — no pattern change
+                z.color1, z.color2 = z.color2, z.color1
+                z.morph_timer = random.uniform(6.0, 12.0)
 
     def _draw_listening(self, draw: ImageDraw.ImageDraw, dt: float) -> None:
-        """LISTENING: all zones become aligned vertical stripes, brighter."""
+        """LISTENING: vertical bars where each pixel randomly flickers between two colors."""
+        c1 = (0, 85, 255)     # blue
+        c2 = (255, 255, 255)  # white
+        pixels = draw._image
         for z in self._zones:
-            c1 = _brighten(z.color1, 1.4)
-            c2 = _brighten(z.color2, 1.2)
-            _draw_stripes(draw, z.x, z.y, z.width, z.height, c1, c2, stripe_width=2, horizontal=False)
+            # Draw vertical stripes, 3px wide, but each pixel randomly picks c1 or c2
+            for x in range(z.x, min(z.x + z.width, self.width)):
+                stripe_idx = (x - z.x) // 3
+                if stripe_idx % 2 == 0:
+                    for y in range(z.y, min(z.y + z.height, self.height)):
+                        pixels.putpixel((x, y), c1 if random.random() < 0.7 else c2)
+                else:
+                    for y in range(z.y, min(z.y + z.height, self.height)):
+                        pixels.putpixel((x, y), c2 if random.random() < 0.7 else c1)
 
     def _update_thinking(self, dt: float) -> None:
-        """THINKING: rapidly shuffle zone patterns and shift colors."""
+        """THINKING: zones shift colors and swap patterns periodically."""
         self._thinking_timer += dt
         self._shuffle_timer += dt
-        if self._shuffle_timer >= self._shuffle_interval:
-            self._shuffle_timer -= self._shuffle_interval
-            for z in self._zones:
-                z.pattern = random.choice(ALL_PATTERNS)
-                # Shift colors through palette.
-                idx = random.randint(0, len(PALETTE) - 1)
-                z.color1 = PALETTE[idx]
-                z.color2 = PALETTE[(idx + random.randint(1, len(PALETTE) - 1)) % len(PALETTE)]
+        # One zone changes every 1.5 seconds
+        if self._shuffle_timer >= 1.5:
+            self._shuffle_timer -= 1.5
+            z = random.choice(self._zones)
+            idx = random.randint(0, len(PALETTE) - 1)
+            z.color1 = PALETTE[idx]
+            z.color2 = PALETTE[(idx + 2) % len(PALETTE)]
+            # Also swap pattern type
+            z.pattern = random.choice(ALL_PATTERNS)
+            # Randomly swap two zones' positions
+            if len(self._zones) >= 2:
+                a, b = random.sample(self._zones, 2)
+                a.x, b.x = b.x, a.x
+                a.y, b.y = b.y, a.y
+                a.width, b.width = b.width, a.width
+                a.height, b.height = b.height, a.height
 
     def _draw_speaking(self, draw: ImageDraw.ImageDraw, dt: float) -> None:
-        """SPEAKING: patterns pulse with a ~2-second breathing rhythm."""
-        self._speaking_phase += dt
-        # Breathing cycle: sine wave with 2-second period.
-        breath = (math.sin(self._speaking_phase * math.pi) + 1.0) / 2.0  # 0..1
-        # Stripe width oscillates between 2 and 5.
-        sw = int(2 + breath * 3)
-
-        palette_offset = int(self._speaking_phase * 0.8) % len(PALETTE)
-        for i, z in enumerate(self._zones):
-            c1 = PALETTE[(palette_offset + i) % len(PALETTE)]
-            c2 = PALETTE[(palette_offset + i + 1) % len(PALETTE)]
-            # Use the zone's pattern but modulate stripe width.
-            self._draw_zone_pattern(draw, z, c1_override=c1, c2_override=c2, stripe_width_override=sw)
+        """SPEAKING: horizontal bars with pixel-level flicker, blue hue — rotated listening."""
+        c1 = (255, 255, 255)  # white
+        c2 = (255, 210, 40)   # yellow
+        pixels = draw._image
+        for z in self._zones:
+            for y in range(z.y, min(z.y + z.height, self.height)):
+                stripe_idx = (y - z.y) // 3
+                if stripe_idx % 2 == 0:
+                    for x in range(z.x, min(z.x + z.width, self.width)):
+                        pixels.putpixel((x, y), c1 if random.random() < 0.7 else c2)
+                else:
+                    for x in range(z.x, min(z.x + z.width, self.width)):
+                        pixels.putpixel((x, y), c2 if random.random() < 0.7 else c1)
 
     def _draw_error(self, draw: ImageDraw.ImageDraw, dt: float) -> None:
-        """ERROR: flash between normal and red, with random glitch frames."""
+        """ERROR: red and white. Only bottom-right quadrant flashes."""
         self._error_flash_timer += dt
-        flash_on = int(self._error_flash_timer * 6) % 2 == 0  # ~3 Hz flash
-        glitch = random.random() < 0.15  # 15% chance of glitch per frame
+        flash_on = int(self._error_flash_timer * 3) % 2 == 0  # slow flash
 
         for z in self._zones:
-            if glitch:
-                # Random scramble for this frame.
-                pat = random.choice(ALL_PATTERNS)
-                c1 = random.choice(PALETTE)
-                c2 = random.choice(PALETTE)
-                self._draw_one_zone(draw, z, pattern_override=pat, c1_override=c1, c2_override=c2)
-            elif flash_on:
-                _draw_solid(draw, z.x, z.y, z.width, z.height, (255, 0, 0))
+            # Check if zone is in bottom-right quadrant
+            in_bottom_right = z.x + z.width / 2 > 32 and z.y + z.height / 2 > 32
+            if in_bottom_right and flash_on:
+                _draw_solid(draw, z.x, z.y, z.width, z.height, (255, 255, 255))
             else:
-                self._draw_one_zone(draw, z)
+                self._draw_one_zone(draw, z, c1_override=(255, 30, 30), c2_override=(255, 255, 255))
 
     def _draw_happy(self, draw: ImageDraw.ImageDraw, dt: float) -> None:
-        """HAPPY: all zones checkerboard with rainbow-cycling colors."""
+        """HAPPY: slowly cycling colors, zones keep their patterns."""
         self._happy_phase += dt
+        # Slow color rotation — one shift every 2 seconds
+        offset = int(self._happy_phase * 0.5) % len(PALETTE)
         for i, z in enumerate(self._zones):
-            offset = int(self._happy_phase * 3 + i) % len(PALETTE)
-            c1 = PALETTE[offset]
-            c2 = PALETTE[(offset + 3) % len(PALETTE)]
-            _draw_checkerboard(draw, z.x, z.y, z.width, z.height, c1, c2, cell_size=4)
+            c1 = PALETTE[(offset + i) % len(PALETTE)]
+            c2 = PALETTE[(offset + i + 2) % len(PALETTE)]
+            self._draw_one_zone(draw, z, c1_override=c1, c2_override=c2)
 
     # Dark palette for sleeping — no dimming, just dark colors
     _SLEEP_COLORS: list[tuple[int, int, int]] = [
-        (20, 25, 50),    # deep navy
-        (30, 35, 55),    # dark slate
-        (15, 20, 40),    # midnight
-        (25, 30, 60),    # dark blue
-        (35, 25, 45),    # dark plum
+        (0, 0, 0),       # black
+        (25, 25, 25),    # dark gray
+        (45, 45, 45),    # medium gray
+        (15, 15, 15),    # near black
+        (35, 35, 35),    # gray
     ]
 
     def _draw_sleeping(self, draw: ImageDraw.ImageDraw, dt: float) -> None:
