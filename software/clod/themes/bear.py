@@ -59,13 +59,45 @@ class BearState:
 
 STATE_COLORS: dict[FaceState, dict[str, tuple[int, int, int]]] = {
     FaceState.IDLE:      {"bg": (15, 15, 20),   "outline": (220, 220, 230)},
-    FaceState.LISTENING: {"bg": (15, 20, 30),   "outline": (255, 200, 60)},
+    FaceState.LISTENING: {"bg": (15, 15, 20),   "outline": (255, 255, 255)},
     FaceState.THINKING:  {"bg": (12, 15, 30),   "outline": (100, 160, 255)},
     FaceState.SPEAKING:  {"bg": (20, 15, 15),   "outline": (255, 150, 100)},
-    FaceState.ERROR:     {"bg": (25, 15, 12),   "outline": (200, 120, 60)},
-    FaceState.HAPPY:     {"bg": (12, 20, 15),   "outline": (100, 255, 150)},
-    FaceState.SLEEPING:  {"bg": (8, 10, 25),    "outline": (50, 60, 100)},
+    FaceState.ERROR:     {"bg": (20, 8, 8),     "outline": (255, 40, 40)},
+    FaceState.HAPPY:     {"bg": (12, 12, 15),   "outline": (255, 255, 255)},
+    FaceState.SLEEPING:  {"bg": (10, 10, 12),   "outline": (120, 120, 130)},
 }
+
+LISTENING_COLORS: list[tuple[int, int, int]] = [
+    (255, 255, 255),   # white
+    (60, 240, 255),    # bright cyan
+    (255, 220, 50),    # bright yellow
+    (255, 100, 200),   # hot pink
+    (100, 255, 150),   # bright green
+    (0, 0, 0),         # black
+]
+
+SPEAKING_COLORS: list[tuple[int, int, int]] = [
+    (255, 230, 50),    # yellow
+    (180, 80, 255),    # purple
+    (255, 255, 255),   # white
+]
+
+ERROR_COLORS: list[tuple[int, int, int]] = [
+    (255, 40, 40),     # red
+    (255, 255, 255),   # white
+    (0, 0, 0),         # black
+]
+
+THINKING_COLORS: list[tuple[int, int, int]] = [
+    (40, 40, 50),      # dark gray (visible but dim)
+    (255, 255, 255),   # white
+]
+
+IDLE_COLORS: list[tuple[int, int, int]] = [
+    (220, 220, 230),   # white
+]
+
+import colorsys
 
 
 # ---------------------------------------------------------------------------
@@ -165,9 +197,10 @@ class BearTheme(ThemeRenderer):
         # --- Lerp colors ---
         colors = STATE_COLORS.get(state, STATE_COLORS[FaceState.IDLE])
         target_bg = colors["bg"]
-        target_outline = colors["outline"]
         color_lerp = min(1.0, 5.0 * dt)
         self._current_bg = _lerp_color(self._current_bg, target_bg, color_lerp)
+
+        target_outline = colors["outline"]
         self._current_outline = _lerp_color(self._current_outline, target_outline, color_lerp)
 
         # --- Draw ---
@@ -324,8 +357,9 @@ class BearTheme(ThemeRenderer):
         tgt.right_pupil_y = 0.0
         tgt.mouth_open = 0.1
         tgt.mouth_offset_y = 0.0
-        tgt.face_shift_x = 0.0
-        tgt.face_shift_y = 1.0
+        # Slow bob around the screen
+        tgt.face_shift_x = math.sin(t * 0.3) * 4.0
+        tgt.face_shift_y = math.cos(t * 0.2) * 3.0
 
         # Occasional eye flutter
         if t >= self._sleep_next_flutter:
@@ -377,15 +411,10 @@ class BearTheme(ThemeRenderer):
                 return color
             return _lerp_color(color_far, color_near, t_val)
 
-        # --- Head circle ---
         hcx, hcy = 32 + sx, 36 + sy
         hr = 22
-        draw.ellipse(
-            [hcx - hr, hcy - hr, hcx + hr, hcy + hr],
-            outline=color, width=2,
-        )
 
-        # --- Ears ---
+        # --- Ears (drawn first, then head covers the overlap) ---
         for ear_x in (15, 49):
             ex = ear_x + sx
             ey = 13 + sy
@@ -398,6 +427,12 @@ class BearTheme(ThemeRenderer):
                 [ex - 6, ey - 6, ex + 6, ey + 6],
                 outline=ear_color, width=2,
             )
+
+        # --- Head circle (filled bg to cover ear overlap, then outline) ---
+        draw.ellipse(
+            [hcx - hr, hcy - hr, hcx + hr, hcy + hr],
+            fill=self._current_bg, outline=color, width=2,
+        )
 
         # --- Eyes ---
         for eye_cx, scale, px, py in [
@@ -428,38 +463,94 @@ class BearTheme(ThemeRenderer):
                     [ecx - er, ecy - er, ecx + er, ecy + er],
                     outline=eye_color, width=2,
                 )
-                # Pupil (filled circle)
-                pr = int(5 * min(scale, 1.0))
+                # Pupil -- vertical bar/capsule (like the Radiohead logo)
+                bar_half_w = 2  # 4px wide
+                bar_half_h = int(6 * min(scale, 1.0))  # ~12px tall
                 pcx = ecx + int(round(px))
                 pcy = ecy + int(round(py))
-                draw.ellipse(
-                    [pcx - pr, pcy - pr, pcx + pr, pcy + pr],
+                draw.rounded_rectangle(
+                    [pcx - bar_half_w, pcy - bar_half_h,
+                     pcx + bar_half_w, pcy + bar_half_h],
+                    radius=2,
                     fill=eye_color,
                 )
 
-        # --- Mouth (zigzag) ---
-        mouth_y = 48 + sy + int(round(st.mouth_offset_y))
+        # --- Upper lip line and mouth ---
+        lip_y = 43 + sy + int(round(st.mouth_offset_y * 0.5))
+        lip_start_x = 12 + sx
+        lip_end_x = 52 + sx
+        lip_mid_x = 32 + sx
+        lip_sag = int(2 * st.mouth_open)
+        # The lowest point of the lip line
+        lip_bottom = lip_y + lip_sag
+
+        if self._current_state != FaceState.SLEEPING:
+            # Draw lip line
+            draw.line(
+                [(lip_start_x, lip_y), (lip_mid_x, lip_bottom), (lip_end_x, lip_y)],
+                fill=color, width=2,
+            )
+
+        # Mouth starts below the lip line — teeth never cross above it
+        mouth_top = lip_bottom + 2
         mouth_amp = int(6 * st.mouth_open)
 
         if mouth_amp < 1:
             # Closed -- flat line
             draw.line(
-                [(14 + sx, mouth_y), (50 + sx, mouth_y)],
+                [(14 + sx, mouth_top), (50 + sx, mouth_top)],
                 fill=color, width=2,
             )
-        else:
-            # Zigzag teeth
+        elif self._current_state != FaceState.SLEEPING:
+            # Zigzag teeth anchored below the lip line
             num_teeth = 6
-            tooth_width = 36 // num_teeth  # 6px each
+            tooth_width = 36 // num_teeth
             start_x = 14 + sx
             points: list[tuple[int, int]] = []
             for i in range(num_teeth + 1):
                 x = start_x + i * tooth_width
                 if i % 2 == 0:
-                    y = mouth_y - mouth_amp
+                    y = mouth_top  # peaks touch just below lip
                 else:
-                    y = mouth_y + mouth_amp
+                    y = mouth_top + mouth_amp  # valleys extend down
                 points.append((x, y))
             draw.line(points, fill=color, width=2)
+
+        # --- Pixel-level color static for LISTENING, HAPPY, SPEAKING ---
+        if self._current_state in (FaceState.IDLE, FaceState.LISTENING, FaceState.HAPPY, FaceState.SPEAKING, FaceState.ERROR, FaceState.THINKING):
+            img = self._apply_pixel_static(img)
+
+        return img
+
+    def _apply_pixel_static(self, img: Image.Image) -> Image.Image:
+        """Replace each bear pixel with a random color — TV static effect."""
+        pixels = img.load()
+        bg = self._current_bg
+        state = self._current_state
+        w, h = img.size
+
+        for y in range(h):
+            for x in range(w):
+                r, g, b = pixels[x, y]
+                # Skip background pixels
+                if abs(r - bg[0]) < 10 and abs(g - bg[1]) < 10 and abs(b - bg[2]) < 10:
+                    continue
+
+                # This pixel is part of the bear — give it a random color
+                if state == FaceState.HAPPY:
+                    # Full rainbow — random hue, high saturation
+                    hue = random.random()
+                    cr, cg, cb = colorsys.hls_to_rgb(hue, 0.55, 1.0)
+                    pixels[x, y] = (int(cr * 255), int(cg * 255), int(cb * 255))
+                elif state == FaceState.LISTENING:
+                    pixels[x, y] = random.choice(LISTENING_COLORS)
+                elif state == FaceState.SPEAKING:
+                    pixels[x, y] = random.choice(SPEAKING_COLORS)
+                elif state == FaceState.ERROR:
+                    pixels[x, y] = random.choice(ERROR_COLORS)
+                elif state == FaceState.THINKING:
+                    pixels[x, y] = random.choice(THINKING_COLORS)
+                elif state == FaceState.IDLE:
+                    pixels[x, y] = random.choice(IDLE_COLORS)
 
         return img
