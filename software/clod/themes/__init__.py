@@ -18,4 +18,15 @@ __all__: list[str] = [
     "EtherealTheme",
     "ParticleCloudTheme",
     "CharacterTheme",
+    "get_all_themes",
 ]
+
+
+def get_all_themes() -> list[ThemeRenderer]:
+    """Return instances of all available themes."""
+    return [
+        BearTheme(),
+        ParticleCloudTheme(),
+        CharacterTheme(),
+        CompositionTheme(),
+    ]
