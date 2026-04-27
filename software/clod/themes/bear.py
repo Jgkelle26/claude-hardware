@@ -357,9 +357,9 @@ class BearTheme(ThemeRenderer):
         tgt.right_pupil_y = 0.0
         tgt.mouth_open = 0.1
         tgt.mouth_offset_y = 0.0
-        # Slow bob around the screen
-        tgt.face_shift_x = math.sin(t * 0.3) * 4.0
-        tgt.face_shift_y = math.cos(t * 0.2) * 3.0
+        # Gentle bob — stays within the safe area
+        tgt.face_shift_x = math.sin(t * 0.3) * 3.0
+        tgt.face_shift_y = math.cos(t * 0.2) * 2.5
 
         # Occasional eye flutter
         if t >= self._sleep_next_flutter:
@@ -379,8 +379,12 @@ class BearTheme(ThemeRenderer):
         img = Image.new("RGB", (self.width, self.height), self._current_bg)
         draw = ImageDraw.Draw(img)
 
-        sx = int(round(st.face_shift_x))
-        sy = int(round(st.face_shift_y))
+        # Scale factor — makes bear smaller and keeps it away from edges
+        S = 0.8
+        # Clamp shift so the bear stays within safe area
+        max_shift = 4
+        sx = int(round(_clamp(st.face_shift_x, -max_shift, max_shift)))
+        sy = int(round(_clamp(st.face_shift_y, -max_shift, max_shift)))
         color = self._current_outline
 
         # --- Depth gradient for face turns ---
@@ -411,20 +415,26 @@ class BearTheme(ThemeRenderer):
                 return color
             return _lerp_color(color_far, color_near, t_val)
 
-        hcx, hcy = 32 + sx, 36 + sy
-        hr = 22
+        hcx, hcy = 32 + sx, int(36 * S + 32 * (1 - S)) + sy
+        hr = int(22 * S)
+
+        # Scaled positions relative to center (32, 32)
+        def sc(val: float) -> int:
+            return int(32 + (val - 32) * S)
 
         # --- Ears (drawn first, then head covers the overlap) ---
         for ear_x in (15, 49):
-            ex = ear_x + sx
-            ey = 13 + sy
+            ex = sc(ear_x) + sx
+            ey = sc(13) + sy
+            ear_r_out = int(10 * S)
+            ear_r_in = int(6 * S)
             ear_color = _side_color(ex)
             draw.ellipse(
-                [ex - 10, ey - 10, ex + 10, ey + 10],
+                [ex - ear_r_out, ey - ear_r_out, ex + ear_r_out, ey + ear_r_out],
                 outline=ear_color, width=2,
             )
             draw.ellipse(
-                [ex - 6, ey - 6, ex + 6, ey + 6],
+                [ex - ear_r_in, ey - ear_r_in, ex + ear_r_in, ey + ear_r_in],
                 outline=ear_color, width=2,
             )
 
@@ -439,35 +449,32 @@ class BearTheme(ThemeRenderer):
             (22, st.left_eye_scale, st.left_pupil_x, st.left_pupil_y),
             (42, st.right_eye_scale, st.right_pupil_x, st.right_pupil_y),
         ]:
-            ecx = eye_cx + sx
-            ecy = 33 + sy
+            ecx = sc(eye_cx) + sx
+            ecy = sc(33) + sy
             eye_color = _side_color(ecx)
 
             if scale < 0.15:
-                # Closed -- thin horizontal line
+                closed_r = int(8 * S)
                 draw.line(
-                    [(ecx - 8, ecy), (ecx + 8, ecy)],
+                    [(ecx - closed_r, ecy), (ecx + closed_r, ecy)],
                     fill=eye_color, width=2,
                 )
             elif scale < 0.4:
-                # Happy crescent -- thick arc at bottom of eye area
-                arc_r = int(10 * scale) + 3
+                arc_r = int((10 * scale + 3) * S)
                 draw.arc(
                     [ecx - arc_r, ecy - arc_r, ecx + arc_r, ecy + arc_r],
                     start=10, end=170, fill=eye_color, width=2,
                 )
             else:
-                # Normal eye -- outer circle (outline only)
-                er = int(10 * scale)
+                er = int(10 * scale * S)
                 draw.ellipse(
                     [ecx - er, ecy - er, ecx + er, ecy + er],
                     outline=eye_color, width=2,
                 )
-                # Pupil -- vertical bar/capsule (like the Radiohead logo)
-                bar_half_w = 2  # 4px wide
-                bar_half_h = int(6 * min(scale, 1.0))  # ~12px tall
-                pcx = ecx + int(round(px))
-                pcy = ecy + int(round(py))
+                bar_half_w = max(1, int(2 * S))
+                bar_half_h = int(6 * min(scale, 1.0) * S)
+                pcx = ecx + int(round(px * S))
+                pcy = ecy + int(round(py * S))
                 draw.rounded_rectangle(
                     [pcx - bar_half_w, pcy - bar_half_h,
                      pcx + bar_half_w, pcy + bar_half_h],
@@ -476,36 +483,32 @@ class BearTheme(ThemeRenderer):
                 )
 
         # --- Upper lip line and mouth ---
-        lip_y = 43 + sy + int(round(st.mouth_offset_y * 0.5))
-        lip_start_x = 12 + sx
-        lip_end_x = 52 + sx
+        lip_y = sc(43) + sy + int(round(st.mouth_offset_y * 0.5 * S))
+        lip_start_x = sc(12) + sx
+        lip_end_x = sc(52) + sx
         lip_mid_x = 32 + sx
-        lip_sag = int(2 * st.mouth_open)
-        # The lowest point of the lip line
+        lip_sag = int(2 * st.mouth_open * S)
         lip_bottom = lip_y + lip_sag
 
         if self._current_state != FaceState.SLEEPING:
-            # Draw lip line
             draw.line(
                 [(lip_start_x, lip_y), (lip_mid_x, lip_bottom), (lip_end_x, lip_y)],
                 fill=color, width=2,
             )
 
-        # Mouth starts below the lip line — teeth never cross above it
         mouth_top = lip_bottom + 2
-        mouth_amp = int(6 * st.mouth_open)
+        mouth_amp = int(6 * st.mouth_open * S)
 
         if mouth_amp < 1:
-            # Closed -- flat line
             draw.line(
-                [(14 + sx, mouth_top), (50 + sx, mouth_top)],
+                [(sc(14) + sx, mouth_top), (sc(50) + sx, mouth_top)],
                 fill=color, width=2,
             )
         elif self._current_state != FaceState.SLEEPING:
-            # Zigzag teeth anchored below the lip line
             num_teeth = 6
-            tooth_width = 36 // num_teeth
-            start_x = 14 + sx
+            mouth_width = int(36 * S)
+            tooth_width = mouth_width // num_teeth
+            start_x = sc(14) + sx
             points: list[tuple[int, int]] = []
             for i in range(num_teeth + 1):
                 x = start_x + i * tooth_width
