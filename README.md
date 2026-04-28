@@ -1,55 +1,126 @@
 # Clod (Claude On Desk)
 
-A Raspberry Pi-powered desk companion that lets you talk to Claude Code with your voice. Press a button (or say "Hey Claude"), speak a command, and a little pixel robot with a giant glowing eye thinks, answers, and reacts on a chunky retro RGB matrix.
+A desk companion that lets you talk to Claude Code with your voice. Speak a command, and a 64×64 RGB LED matrix reacts in real-time — listening, thinking, speaking — with swappable animated themes.
 
-Built around a **64×64 RGB LED matrix** that renders a single procedural eye as Clod's face. The Pi acts as a thin client — it captures your voice, transcribes it, sends it to your Mac over USB, and Claude Code does the real work. The response streams back, gets spoken aloud, and the eye reacts to every step in chunky glowing pixels.
-
-## How It Works
+## Architecture
 
 ```
-You speak → Pi captures audio (USB mic) → Vosk transcribes → SSH to Mac →
-Claude Code runs → response streams back → Piper TTS speaks → you hear the answer
+Mac (handles everything):
+  Mic/AirPods → Speech-to-Text (Whisper) → Claude Code CLI → Text-to-Speech (say)
+  Sends state events to Pi over WiFi ↓
+
+Pi (display only):
+  Receives state events → drives 64×64 RGB LED matrix with animated themes
 ```
 
-The eye listens (wide open, iris steady), thinks (darts around in figure-8s), speaks (micro-squints synced to TTS), and idles (lazy blinking). Color-coded states let you read its mood from across the room — orange iris idle, bright for listening, blue for thinking, green for happy, red for error.
+Your Mac captures audio, transcribes it, runs Claude Code, speaks the response, and tells the Pi what state to display. The Pi is a pure display device — no audio hardware needed.
 
-## Shopping List
+## Themes
 
-All Amazon unless noted.
+4 swappable visual themes, each with 7 animated states (idle, listening, thinking, speaking, happy, error, sleeping):
 
-| # | Component | Part | Est. Price | Phase |
-|---|-----------|------|-----------|-------|
-| 1 | Board | Raspberry Pi Zero 2W with Pre-Soldered Header (iUniker kit) | $25 | 1 |
-| 2 | Storage | 16GB MicroSD Card C10/A1 (2-pack) | $10 | 1 |
-| 3 | Display | 64×64 RGB LED Matrix Panel, HUB75, P3 (3mm pitch) | $35 | 1 |
-| 4 | Matrix Adapter | WatangTech RGB Matrix Adapter Board for Pi (HUB75, dual power) | $15 | 1 |
-| 5 | Power Supply | 5V 4A DC Power Supply (5.5×2.1mm barrel jack) | $12 | 1 |
-| 6 | Microphone | USB Mini Microphone (plug-and-play UAC) | $8 | 1 |
-| 7 | Sound Card | Sabrent USB External Stereo Sound Adapter | $8 | 1 |
-| 8 | Amplifier | DEVMO PAM8403 3W Stereo Amp with volume control | $7 | 1 |
-| 9 | Speaker | Gikfun 4Ω 40mm 3W Full Range Speaker (2-pack) | $8 | 1 |
-| 10 | Button | 12mm Tactile Push Button (25-pack, Gikfun) | $6 | 1 |
-| 11 | Wiring | Dupont Jumper Wires 20cm, M-M/M-F/F-F assortment (120pcs) | $7 | 1 |
-| 12 | Servo | SG90 Micro Servo 9g | $3 | 3 |
-| | | **TOTAL** | **~$144** | |
+- **Bear** — Radiohead modified bear logo with pixel-level color static effects
+- **Particles** — 300 swarming single-pixel atoms with per-state color palettes
+- **Character** — Dithered pixel portrait face emerging from probabilistic noise
+- **Composition** — Geometric De Stijl zones with pixel-flicker bar animations
 
-The Pi Zero 2W can be hard to find in stock — check [rpilocator.com](https://rpilocator.com) for live inventory if needed.
+Switch themes by sending `theme:next` or `theme:Bear` from the Mac.
 
-## Build Phases
+## Quick Start
 
-- **Phase 1 — "It Speaks + Sees"**: Voice pipeline AND the 64×64 matrix face running together. Press button, talk, hear Claude's answer, watch the eye react.
-- **Phase 2 — "It Has a Body"**: 3D-printed enclosure (deferred until core build proves out).
-- **Phase 3 — "It Moves"**: SG90 servo for nodding and tilting body language.
-- **Phase 4 — "It Lives"**: Wake word ("Hey Claude"), idle behaviors, sound design, easter eggs.
+### 1. Pi Setup
+
+Flash Raspberry Pi OS Lite (64-bit) onto a MicroSD card with WiFi and SSH enabled. Boot the Pi, SSH in, then:
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3-pip python3-venv git
+git clone https://github.com/Jgkelle26/claude-hardware.git ~/claude-hardware
+cd ~/claude-hardware/software
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Install the RGB matrix library (takes 10-15 min on Pi Zero 2W):
+```bash
+sudo apt install -y python3-dev libjpeg62-turbo-dev zlib1g-dev libfreetype6-dev cmake
+pip install pillow --no-binary pillow --force-reinstall
+pip install git+https://github.com/hzeller/rpi-rgb-led-matrix
+```
+
+Run the display:
+```bash
+sudo /home/pi/claude-hardware/software/.venv/bin/python3 -m clod.pi_main --theme Bear
+```
+
+### 2. Mac Setup
+
+```bash
+cd ~/claude-hardware/software
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r mac/requirements.txt
+```
+
+Run the orchestrator:
+```bash
+python -m mac
+```
+
+Press Enter to speak, Ctrl+C to quit. The Mac captures your voice, sends it to Claude Code, speaks the response, and updates the Pi's display in real-time.
+
+## Shopping List (Display-Only Build)
+
+| # | Component | Part | Est. Price |
+|---|-----------|------|-----------|
+| 1 | Board | Raspberry Pi Zero 2W with Pre-Soldered Header | $25 |
+| 2 | Storage | 16GB MicroSD Card C10/A1 | $10 |
+| 3 | Display | 64×64 RGB LED Matrix Panel, HUB75, P3 (3mm pitch) | $35 |
+| 4 | Matrix Adapter | WatangTech RGB Matrix Adapter Board for Pi (HUB75) | $15 |
+| 5 | Power Supply | 5V 4A DC Power Supply (5.5×2.1mm barrel jack) | $12 |
+| | | **TOTAL** | **~$97** |
 
 ## Project Structure
 
 ```
 claude-hardware/
-├── hardware/          # BOM, wiring diagrams, 3D print files
-├── software/clod/     # Python package (asyncio event bus architecture)
-├── setup/             # Pi configuration and install scripts
-└── docs/              # Architecture docs
+├── software/
+│   ├── mac/               # Mac-side orchestrator (audio, STT, Claude, TTS)
+│   │   ├── orchestrator.py    # Main pipeline
+│   │   ├── audio.py           # Mic capture with VAD
+│   │   ├── stt.py             # Whisper speech-to-text
+│   │   ├── claude_runner.py   # Claude Code CLI wrapper
+│   │   ├── tts.py             # macOS say command
+│   │   └── pi_client.py       # TCP client → Pi
+│   ├── clod/              # Pi-side display driver
+│   │   ├── pi_main.py        # Entry point
+│   │   ├── pi_server.py      # TCP server for state events
+│   │   ├── themes/            # Visual themes
+│   │   ├── event_bus.py       # Async pub/sub
+│   │   └── matrix_backends.py # Mock (Mac) + Real (Pi) backends
+│   └── config.yaml
+├── CLAUDE.md
+└── README.md
 ```
 
-See [CLAUDE.md](CLAUDE.md) for development conventions and detailed architecture.
+---
+
+<details>
+<summary><strong>Alternative: Full Hardware Build (Pi handles audio)</strong></summary>
+
+If you want all audio on the Pi instead of the Mac, you'll need a USB hub and additional parts:
+
+| # | Component | Part | Est. Price |
+|---|-----------|------|-----------|
+| 6 | Microphone | USB Mini Microphone | $8 |
+| 7 | Sound Card | Sabrent USB External Stereo Sound Adapter | $8 |
+| 8 | Amplifier | DEVMO PAM8403 3W Stereo Amp | $7 |
+| 9 | Speaker | Gikfun 4Ω 40mm 3W Speaker | $8 |
+| 10 | USB Hub | Powered USB Hub | $8 |
+| 11 | Button | 12mm Tactile Push Button | $6 |
+| 12 | Wiring | Dupont Jumper Wires | $7 |
+
+The Pi Zero 2W has one USB data port. A USB hub lets you connect both the mic and sound card. The Pi captures audio, runs Vosk for STT, SSHes to the Mac for Claude Code, and plays responses through Piper TTS + the PAM8403 amp + speaker.
+
+This approach puts more load on the Pi's limited CPU and RAM but makes the build fully self-contained.
+
+</details>
