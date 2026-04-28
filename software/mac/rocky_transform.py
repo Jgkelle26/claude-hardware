@@ -214,7 +214,7 @@ def _transform_sentence(sentence: str) -> str:
         result = result.rstrip("?").rstrip() + ", question?"
     else:
         # Add period if no punctuation
-        if not result[-1] in ".!?":
+        if result[-1] not in ".!?":
             result += "."
 
     return result

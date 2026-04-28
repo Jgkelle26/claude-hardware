@@ -109,6 +109,10 @@ class ClodOrchestrator:
                     await self._pi.send_state(user_input)
                     print(f"  Sent: {user_input}")
                     continue
+                elif user_input == "clear":
+                    self._claude.clear_history()
+                    print("  Conversation history cleared.")
+                    continue
                 elif user_input == "voice":
                     self._voice_index = (self._voice_index + 1) % len(EDGE_VOICES)
                     voice_id, voice_name = EDGE_VOICES[self._voice_index]
