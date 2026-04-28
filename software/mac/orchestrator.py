@@ -22,6 +22,22 @@ EDGE_VOICES = [
     ("en-AU-WilliamNeural", "William (Australian male)"),
 ]
 
+REPLAY_PHRASES = [
+    "repeat that",
+    "say that again",
+    "what did you say",
+    "say it again",
+    "repeat",
+]
+
+
+def _normalize(text: str) -> str:
+    cleaned = "".join(c for c in text.lower() if c.isalnum() or c.isspace())
+    return " ".join(cleaned.split())
+
+
+_NORMALIZED_REPLAY_PHRASES = {_normalize(p) for p in REPLAY_PHRASES}
+
 
 class ClodOrchestrator:
     """Mac-side voice pipeline: mic -> STT -> Claude Code -> TTS -> speaker.
@@ -43,6 +59,21 @@ class ClodOrchestrator:
             if voice_id == self._tts._voice:
                 self._voice_index = i
                 break
+        self._last_response: str | None = None
+
+    async def _replay_last(self) -> None:
+        if self._last_response is None:
+            print("  Nothing to replay yet.")
+            await self._set_state("idle")
+            return
+        print(f"  Replaying: {self._last_response}")
+        await self._set_state("speaking")
+        try:
+            await self._tts.speak(self._apply_speech_mode(self._last_response))
+        except Exception as exc:
+            await self._handle_error("TTS failed", exc)
+            return
+        await self._set_state("idle")
 
     async def _set_state(self, state: str) -> None:
         """Update the Pi display and print the state to the terminal."""
@@ -89,7 +120,7 @@ class ClodOrchestrator:
         try:
             while True:
                 mode_label = f" [{self._speech_mode} mode]" if self._speech_mode != "normal" else ""
-                print(f"Enter=speak{mode_label} | 'theme' | 'voice' | 'rocky'/'normal'")
+                print(f"Enter=speak{mode_label} | 'theme' | 'voice' | 'rocky'/'normal' | 'clear' | 'replay'")
                 user_input = await self._wait_for_input()
 
                 # Handle commands
@@ -112,6 +143,9 @@ class ClodOrchestrator:
                 elif user_input == "clear":
                     self._claude.clear_history()
                     print("  Conversation history cleared.")
+                    continue
+                elif user_input == "replay":
+                    await self._replay_last()
                     continue
                 elif user_input == "voice":
                     self._voice_index = (self._voice_index + 1) % len(EDGE_VOICES)
@@ -171,6 +205,9 @@ class ClodOrchestrator:
 
                 # Check for voice commands before sending to Claude
                 lower = transcript.lower().strip()
+                if _normalize(transcript) in _NORMALIZED_REPLAY_PHRASES:
+                    await self._replay_last()
+                    continue
                 if any(phrase in lower for phrase in [
                     "switch theme", "next theme", "change theme",
                     "switch the theme", "change the theme",
@@ -192,6 +229,8 @@ class ClodOrchestrator:
                 except Exception as exc:
                     await self._handle_error("Claude failed", exc)
                     continue
+
+                self._last_response = response
 
                 # Step 5: Apply speech mode transformation
                 spoken_text = self._apply_speech_mode(response)
