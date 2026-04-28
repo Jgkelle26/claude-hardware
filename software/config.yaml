@@ -4,7 +4,7 @@
 # SSH connection to the Mac that runs Claude Code.
 mac_ssh:
   host: 192.168.7.1
-  user: joseph
+  user: your-username
   key_path: ~/.ssh/id_ed25519
 
 # Vosk STT model.
