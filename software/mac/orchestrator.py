@@ -73,6 +73,7 @@ class ClodOrchestrator:
         Claude response (pre-speech-mode transform), and records it to history.
         """
         raw_chunks: list[str] = []
+        speaking_started = False
 
         async def claude_chunks():
             async for chunk in self._claude.run_stream(transcript):
@@ -84,12 +85,15 @@ class ClodOrchestrator:
                 yield self._apply_speech_mode(sentence)
 
         async def announce(sentence: str) -> None:
+            nonlocal speaking_started
+            if not speaking_started:
+                await self._set_state("speaking")
+                speaking_started = True
             if self._speech_mode != "normal":
                 print(f"  Rocky:  {sentence}")
             else:
                 print(f"  Claude: {sentence}")
 
-        await self._set_state("speaking")
         await self._tts.speak_stream(transformed_sentences(), on_sentence=announce)
 
         response = "".join(raw_chunks).strip()

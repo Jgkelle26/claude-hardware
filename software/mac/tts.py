@@ -113,13 +113,14 @@ class TextToSpeech:
     ) -> str:
         """Speak sentences as they arrive. Synth and playback overlap.
 
-        Returns the full concatenated text that was actually spoken (raw, before
-        any per-sentence transformation by ``on_sentence``).
+        ``on_sentence`` is called once per sentence before synthesis starts —
+        callers use it to print/log or transition state on first audio. The
+        callback receives the sentence as passed in (transformations should
+        happen upstream of this iterator).
 
-        ``on_sentence`` is called once per sentence with the raw text *before*
-        synthesis — used by callers to log what's being spoken in real time.
-        If the caller wants per-sentence text transformation (e.g. rocky mode),
-        they should transform sentences upstream before passing them in.
+        Returns the joined sentences for convenience; the caller usually keeps
+        its own raw accumulator since this string reflects whatever was passed
+        in (potentially already transformed).
         """
         if self._voice is None:
             return await self._speak_stream_say(sentences, on_sentence)
