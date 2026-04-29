@@ -5,9 +5,29 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import tempfile
+from typing import AsyncIterator, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+
+async def split_sentences(chunks: AsyncIterator[str]) -> AsyncIterator[str]:
+    """Yield complete sentences from an async stream of text chunks."""
+    buf = ""
+    async for chunk in chunks:
+        buf += chunk
+        parts = _SENTENCE_BOUNDARY.split(buf)
+        for part in parts[:-1]:
+            stripped = part.strip()
+            if stripped:
+                yield stripped
+        buf = parts[-1]
+    tail = buf.strip()
+    if tail:
+        yield tail
 
 
 class TextToSpeech:
@@ -50,28 +70,117 @@ class TextToSpeech:
 
     async def _speak_edge(self, text: str) -> None:
         """Speak using Edge TTS — generates audio file then plays it."""
+        tmp_path = await self._synth_edge(text)
+        try:
+            await self._play(tmp_path)
+        finally:
+            self._unlink(tmp_path)
+
+    async def _synth_edge(self, text: str) -> str:
+        """Synthesize text to a temp mp3 file via Edge TTS. Returns path."""
         import edge_tts
 
         tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
         tmp_path = tmp.name
         tmp.close()
-
         try:
             communicate = edge_tts.Communicate(text, self._voice)
             await communicate.save(tmp_path)
+        except Exception:
+            self._unlink(tmp_path)
+            raise
+        return tmp_path
 
-            # Play the audio file
-            proc = await asyncio.create_subprocess_exec(
-                "afplay", tmp_path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.communicate()
-        finally:
+    async def _play(self, path: str) -> None:
+        proc = await asyncio.create_subprocess_exec(
+            "afplay", path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+
+    @staticmethod
+    def _unlink(path: str) -> None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    async def speak_stream(
+        self,
+        sentences: AsyncIterator[str],
+        on_sentence: Callable[[str], Awaitable[None]] | None = None,
+    ) -> str:
+        """Speak sentences as they arrive. Synth and playback overlap.
+
+        Returns the full concatenated text that was actually spoken (raw, before
+        any per-sentence transformation by ``on_sentence``).
+
+        ``on_sentence`` is called once per sentence with the raw text *before*
+        synthesis — used by callers to log what's being spoken in real time.
+        If the caller wants per-sentence text transformation (e.g. rocky mode),
+        they should transform sentences upstream before passing them in.
+        """
+        if self._voice is None:
+            return await self._speak_stream_say(sentences, on_sentence)
+
+        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(maxsize=2)
+        spoken: list[str] = []
+        synth_failed: list[Exception] = []
+
+        async def producer() -> None:
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+                async for sentence in sentences:
+                    if not sentence:
+                        continue
+                    spoken.append(sentence)
+                    if on_sentence is not None:
+                        await on_sentence(sentence)
+                    try:
+                        path = await self._synth_edge(sentence)
+                    except Exception as exc:
+                        synth_failed.append(exc)
+                        await queue.put(("say", sentence))
+                        continue
+                    await queue.put(("file", path))
+            finally:
+                await queue.put(None)
+
+        async def consumer() -> None:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                kind, payload = item
+                if kind == "file":
+                    try:
+                        await self._play(payload)
+                    finally:
+                        self._unlink(payload)
+                else:
+                    await self._speak_say(payload)
+
+        await asyncio.gather(producer(), consumer())
+
+        if synth_failed:
+            logger.warning("Edge TTS failed on %d sentence(s); used say fallback",
+                           len(synth_failed))
+        return " ".join(spoken)
+
+    async def _speak_stream_say(
+        self,
+        sentences: AsyncIterator[str],
+        on_sentence: Callable[[str], Awaitable[None]] | None,
+    ) -> str:
+        spoken: list[str] = []
+        async for sentence in sentences:
+            if not sentence:
+                continue
+            spoken.append(sentence)
+            if on_sentence is not None:
+                await on_sentence(sentence)
+            await self._speak_say(sentence)
+        return " ".join(spoken)
 
     async def _speak_say(self, text: str) -> None:
         """Fallback: speak using macOS say command."""

@@ -9,7 +9,7 @@ from mac.claude_runner import ClaudeRunner
 from mac.pi_client import PiClient
 from mac.rocky_transform import rocky_transform
 from mac.stt import SpeechToText
-from mac.tts import TextToSpeech
+from mac.tts import TextToSpeech, split_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +46,19 @@ class ClodOrchestrator:
     Supports speech modes: 'normal' and 'rocky'.
     """
 
-    def __init__(self, pi_host: str = "clod.local", pi_port: int = 9999) -> None:
+    def __init__(
+        self,
+        pi_host: str = "clod.local",
+        pi_port: int = 9999,
+        streaming_tts: bool = True,
+    ) -> None:
         self._pi = PiClient(host=pi_host, port=pi_port)
         self._recorder = AudioRecorder()
         self._stt = SpeechToText()
         self._claude = ClaudeRunner()
         self._tts = TextToSpeech(voice="en-GB-RyanNeural")
         self._speech_mode: str = "normal"  # "normal" or "rocky"
+        self._streaming_tts = streaming_tts
         # Determine initial voice index from current TTS voice
         self._voice_index: int = 0
         for i, (voice_id, _) in enumerate(EDGE_VOICES):
@@ -60,6 +66,35 @@ class ClodOrchestrator:
                 self._voice_index = i
                 break
         self._last_response: str | None = None
+
+    async def _stream_and_speak(self, transcript: str) -> str:
+        """Stream Claude's response, splitting on sentence boundaries and
+        speaking each sentence as soon as it arrives. Returns the full raw
+        Claude response (pre-speech-mode transform), and records it to history.
+        """
+        raw_chunks: list[str] = []
+
+        async def claude_chunks():
+            async for chunk in self._claude.run_stream(transcript):
+                raw_chunks.append(chunk)
+                yield chunk
+
+        async def transformed_sentences():
+            async for sentence in split_sentences(claude_chunks()):
+                yield self._apply_speech_mode(sentence)
+
+        async def announce(sentence: str) -> None:
+            if self._speech_mode != "normal":
+                print(f"  Rocky:  {sentence}")
+            else:
+                print(f"  Claude: {sentence}")
+
+        await self._set_state("speaking")
+        await self._tts.speak_stream(transformed_sentences(), on_sentence=announce)
+
+        response = "".join(raw_chunks).strip()
+        self._claude._record(transcript, response)
+        return response
 
     async def _replay_last(self) -> None:
         if self._last_response is None:
@@ -223,31 +258,33 @@ class ClodOrchestrator:
                     await self._set_state("idle")
                     continue
 
-                # Step 4: Send to Claude
-                try:
-                    response = await self._claude.run(transcript)
-                except Exception as exc:
-                    await self._handle_error("Claude failed", exc)
-                    continue
+                # Step 4-6: Send to Claude and speak (streaming or batch)
+                if self._streaming_tts:
+                    try:
+                        response = await self._stream_and_speak(transcript)
+                    except Exception as exc:
+                        await self._handle_error("Claude/TTS failed", exc)
+                        continue
+                else:
+                    try:
+                        response = await self._claude.run(transcript)
+                    except Exception as exc:
+                        await self._handle_error("Claude failed", exc)
+                        continue
+                    spoken_text = self._apply_speech_mode(response)
+                    if self._speech_mode != "normal":
+                        print(f"  Claude: {response}")
+                        print(f"  Rocky:  {spoken_text}")
+                    else:
+                        print(f"  Claude: {response}")
+                    await self._set_state("speaking")
+                    try:
+                        await self._tts.speak(spoken_text)
+                    except Exception as exc:
+                        await self._handle_error("TTS failed", exc)
+                        continue
 
                 self._last_response = response
-
-                # Step 5: Apply speech mode transformation
-                spoken_text = self._apply_speech_mode(response)
-
-                if self._speech_mode != "normal":
-                    print(f"  Claude: {response}")
-                    print(f"  Rocky:  {spoken_text}")
-                else:
-                    print(f"  Claude: {response}")
-
-                # Step 6: Speak the response
-                await self._set_state("speaking")
-                try:
-                    await self._tts.speak(spoken_text)
-                except Exception as exc:
-                    await self._handle_error("TTS failed", exc)
-                    continue
 
                 # Step 7: Back to idle
                 await self._set_state("idle")
